@@ -9,9 +9,6 @@ también se explica el significado de cada parámetro
 # ruta a la base de datos Access para hacer backup
 db = r'C:\Users\solis\Documents\DB\Ipasub97.mdb'
 
-# nombre de la tabla copia de foreign keys (tabla del sistema)
-trelationships = '_msysrelationships'
-
 # directorio de resultados
 dir_out = r'C:\Users\solis\Documents\DB\bak'
 

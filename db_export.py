@@ -21,8 +21,8 @@ Para leer las foreign keys debes, en ms access:
 """
 import littleLogging as logging
 
-header_sql_file = ('SET CLIENT_ENCODING TO UTF8;',
-                   'SET STANDARD_CONFORMING_STRINGS TO ON;')
+SQL_FILE_HEADERS = ('SET CLIENT_ENCODING TO UTF8;',
+                    'SET STANDARD_CONFORMING_STRINGS TO ON;')
 
 # número de líneas separadoras en los ficheros output
 NHYPHEN = 70
@@ -38,12 +38,17 @@ class MsAccess_migrate():
     Lee la estructura de una db access para escribir las sentencias sql
         que permiten migrarla a otro rdbs
     """
+    SQL_FILE_HEADERS = ('SET CLIENT_ENCODING TO UTF8;',
+                        'SET STANDARD_CONFORMING_STRINGS TO ON;')
 
-    def __init__(self, dbaccess: str, recreate_tables=True):
-        from os.path import isfile, join, split, splitext
+
+    def __init__(self, dbaccess: str, dir_out: str, recreate_tables=True):
+        from os.path import isdir, isfile, join, split, splitext
 
         if not isfile(dbaccess):
             raise ValueError(f'No existe {dbaccess}')
+        if not isdir(dir_out):
+            raise ValueError(f'No existe {dir_out}')
 
         self.constr_access = \
         r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};' +\
@@ -55,6 +60,8 @@ class MsAccess_migrate():
         self.constr_sqlite = dbs
         self.con_a = None
         self.con_s = None
+        self.dir_out = dir_out
+        self.base_name = f'{name}'
         self.recreate_tables = recreate_tables
 
 
@@ -106,19 +113,22 @@ class MsAccess_migrate():
         type_name TEXT,
         column_size INTEGER,
         pg_type_name TEXT,
-        PRIMARY KEY (table_name, col_name))"""
+        PRIMARY KEY (table_name, col_name),
+        FOREIGN KEY(table_name) REFERENCES tables(name))
+        """
 
         create_table3 = \
         """
         create table if not exists relationships (
-        name TEXT,
-        table_name TEXT,
-        col_name TEXT,
-        ncolumn INTEGER,
-        icolumn INTEGER,
+        referenced_table TEXT,
+        referenced_cols TEXT,
         parent_table TEXT,
-        parent_column TEXT,
-        PRIMARY KEY (name))"""
+        parent_cols TEXT,
+        my_rship_name TEXT,
+        PRIMARY KEY (referenced_table, referenced_cols),
+        FOREIGN KEY(referenced_table) REFERENCES tables(name),
+        FOREIGN KEY(parent_table) REFERENCES tables(name))
+        """
 
         sqls = (create_table1, create_table2, create_table3)
         cur = self.con_s.cursor()
@@ -145,6 +155,7 @@ class MsAccess_migrate():
                   if row.table_type in ('TABLE', 'SYSTEM TABLE')]
         self.__insert_into_tables(tables)
         self.__insert_into_columns(tables)
+        self.__insert_into_relationships()
 
 
     def __primary_key_get(self, table_name, table_type):
@@ -211,45 +222,47 @@ class MsAccess_migrate():
             self.con_s.commit()
 
 
-    def __insert_into_relationships(self, tables):
+    def __insert_into_relationships(self):
         """
         inserta las foreign keys en relationships
         """
         select = \
         """
-        select szRelationship, szReferencedObject, szReferencedColumn,
-            ccolumn, icolumn, szObject, szColumn
-        from MSysRelationships
-        where szReferencedObject=?
-        order by ccolumn, icolumn
+        SELECT szReferencedObject
+        FROM MSysRelationships
+        GROUP BY szReferencedObject
+        ORDER BY szReferencedObject;
         """
+
         insert = \
         """
-        insert into relationships (name, table_name, col_name, ncolumn,
-        icolumn, parent_table, parent_column)
-        values (?, ?, ?, ?, ?, ?, ?)"""
+        insert into relationships (referenced_table, referenced_cols,
+            parent_table, parent_cols, my_rship_name)
+        values (?, ?, ?, ?, ?);
+        """
         update = \
-        """update relationships set table_name=?, col_name=?, ncolumn=?,
-        icolumn=?, parent_table=?, parent_column=? where name=?"""
+        """
+        update relationships set parent_table=?, parent_cols=?,
+            my_rship_name=?
+        where referenced_table=? and referenced_cols=?;
+        """
 
+        func_iter = self.__relationship_get
+        cur = self.con_a.cursor()
+        cur.execute(select)
+        tables = [table for table in cur.fetchall()]
         cur = self.con_s.cursor()
-        cur1 = self.con_a.cursor()
         for table in tables:
-            try:
-                cur1.execute(select, (table[0],))
-            except:
-                raise ValueError(f'error al ejecutar\n{select}\n' +\
-                                 f'con la tabla {table[0]}')
-            rows = [row for row in cur1.fetchall()]
-
-            try:
-                cur.execute(insert, table)
-            except:
-                cur.execute(update, (table[1], table[2], table[0]))
+            for items in func_iter(table):
+                try:
+                    cur.execute(insert, items)
+                except:
+                    cur.execute(update, (items[2], items[3], items[4],
+                                         items[0], items[1]))
         self.con_s.commit()
 
 
-    def _relationship_get(self, tables):
+    def __relationship_get(self, table: str):
         """
         lee el contenido de la tabla MSysRelationShips y lo devuelve como
             un iterator
@@ -267,26 +280,79 @@ class MsAccess_migrate():
         """
         select szReferencedObject, szReferencedColumn, szObject, szColumn
         from MSysRelationships
-        where szReferencedObject=?
+        where szRelationship=?
         order by icolumn
         """
 
         cur = self.con_a.cursor()
-        cur1 = self.con_a.cursor()
-        for table in tables:
-            cur.execute(select, (table[0],))
-            for i, rship in enumerate(cur.fetchall()):
-                cur1.execute(select1, (rship,))
-                cols = [(row[0], row[1], row[2], row[3])
-                        for row in cur1.fetchall()]
-                referenced_table = cols[0][0]
-                referenced_cols = [fila[1] for fila in cols]
-                parent_table = cols[0][2]
-                parent_cols = [fila[3] for fila in cols]
-                referenced_cols = ', '.join(referenced_cols)
-                parent_cols = ', '.join(parent_cols)
-                rship_name = f'{referenced_table}_{parent_table}_{i:d}'
-                yield(table[0], referenced_cols, )
+        cur.execute(select, table)
+        rships = [row for row in cur.fetchall()]
+        for i, rship in enumerate(rships):
+            cur.execute(select1, (rship[0],))
+            cols = [(row[0], row[1], row[2], row[3])
+                    for row in cur.fetchall()]
+            referenced_table = cols[0][0]
+            referenced_cols = [fila[1] for fila in cols]
+            parent_table = cols[0][2]
+            parent_cols = [fila[3] for fila in cols]
+            referenced_cols = ', '.join(referenced_cols)
+            parent_cols = ', '.join(parent_cols)
+            rship_name = f'{referenced_table}_{parent_table}_{i:d}'
+            yield(referenced_table, referenced_cols, parent_table,
+                  parent_cols, rship_name)
+
+
+    def write_create_tables_sql(self):
+        """
+        escribe un fichero sql con las instrucciones para crear las tablas
+        """
+        def func_fmt(row):
+            row[0] = row[0].lower()
+            if row[3] == 'varchar' and row[1] > 0:
+                row[3] = f'{row[0]} varchar({row[1]:d})'
+            return row
+
+        select = \
+        """
+        select name, primary_key from tables
+        where type = 'TABLE'
+        order by name
+        """
+
+        select1 = \
+        """
+        select col_name, column_size, pg_type_name
+        from columns
+        where table_name=?;
+        """
+
+        from os.path import join
+
+        SPECIFIC_NAME = '_create_tables.sql'
+        STM = 'DROP TABLE IF EXISTS {} CASCADE;\n\n'
+        STM1 = 'CREATE TABLE {} (\n'
+        STM2 = 'PRIMARY KEY ({}))\n'
+
+        fo = join(self.dir_out, f'{self.base_name}'+f'{SPECIFIC_NAME}')
+        cur = self.con_s.cursor()
+        cur.execute(select)
+        tables = [table for table in cur.fetchall()]
+        headers = '\n'.join(self.SQL_FILE_HEADERS)
+        with open(fo, 'w') as f:
+            f.write(f'{headers}\n')
+            for table in tables:
+                f.write('\n')
+                f.write(STM.format(table[0]))
+                f.write(STM1.format(table[0]))
+                cur.execute(select1, (table[0],))
+                rows = [func_fmt(row) for row in cur.fetchall()]
+                columns = ',\n'.join(rows)
+                f.write(f'{columns}')
+                if table[1]:
+                    f.write(',\n')
+                    f.write(STM2.format(table[1]))
+                else:
+                    f.write('\n)\n')
 
 
     @staticmethod

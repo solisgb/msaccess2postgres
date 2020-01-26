@@ -41,7 +41,7 @@ if __name__ == "__main__":
 
         startTime = time()
 
-        migrate = msa(par.db)
+        migrate = msa(par.db, par.dir_out)
         migrate.structure_to_sqlite()
 
         xtime = time() - startTime
