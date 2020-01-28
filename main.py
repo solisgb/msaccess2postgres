@@ -42,7 +42,10 @@ if __name__ == "__main__":
         startTime = time()
 
         migrate = msa(par.db, par.dir_out)
-        migrate.structure_to_sqlite()
+        if par.create_db_structure:
+            migrate.structure_to_sqlite()
+        if par.write_sql:
+            migrate.create_tables_sql()
 
         xtime = time() - startTime
         print(f'The script took {xtime:.2f} secs')
@@ -54,4 +57,4 @@ if __name__ == "__main__":
         logging.append(msg)
     finally:
         logging.dump()
-        print('Se ha generado el fichero log.txt')
+        print('Se ha generado el fichero app.log')

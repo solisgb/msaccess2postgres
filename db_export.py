@@ -19,13 +19,13 @@ Para leer las foreign keys debes, en ms access:
     permisos y usuarios de grupo, como administrador, tipo de objeto tabla,
     nombre del objeto MysRelationShips, marcar leer diseño y leer datos
 """
+import pyodbc
+import sqlite3
 import littleLogging as logging
 
 SQL_FILE_HEADERS = ('SET CLIENT_ENCODING TO UTF8;',
-                    'SET STANDARD_CONFORMING_STRINGS TO ON;')
-
-# número de líneas separadoras en los ficheros output
-NHYPHEN = 70
+                    'SET STANDARD_CONFORMING_STRINGS TO ON;',
+                    'BEGIN;')
 
 # molde para fichero FILE_COPYFROM metacomando de psql
 copyfrom = ("\copy {} ({}) ",
@@ -42,7 +42,7 @@ class MsAccess_migrate():
                         'SET STANDARD_CONFORMING_STRINGS TO ON;')
 
 
-    def __init__(self, dbaccess: str, dir_out: str, recreate_tables=True):
+    def __init__(self, dbaccess: str, dir_out: str):
         from os.path import isdir, isfile, join, split, splitext
 
         if not isfile(dbaccess):
@@ -56,13 +56,11 @@ class MsAccess_migrate():
 
         head, tail = split(dbaccess)
         name, ext = splitext(tail)
-        dbs = join(head, f'{name}_struct.db')
-        self.constr_sqlite = dbs
+        self.constr_sqlite = join(dir_out, f'{name}_struct.db')
         self.con_a = None
         self.con_s = None
         self.dir_out = dir_out
         self.base_name = f'{name}'
-        self.recreate_tables = recreate_tables
 
 
     def structure_to_sqlite(self):
@@ -70,11 +68,8 @@ class MsAccess_migrate():
         Lee la estructura de la db access y crea un fichero sqlite con la
             información de la estructura (no los datos)
         """
-        import pyodbc
-        import sqlite3
         try:
-            self.con_a = pyodbc.connect(self.constr_access)
-            self.con_s = sqlite3.connect(self.constr_sqlite)
+            self.__open_connections()
             self.__create_tables()
             self.__populate_tables()
         except:
@@ -82,10 +77,23 @@ class MsAccess_migrate():
             msg = format_exc()
             logging.append(msg)
         finally:
-            if self.con_a:
-                self.con_a.close()
-            if self.con_s:
-                self.con_s.close()
+            self.__close_connections()
+
+
+    def __open_connections(self):
+        if self.con_a is None:
+            self.con_a = pyodbc.connect(self.constr_access)
+        if self.con_s is None:
+            self.con_s = sqlite3.connect(self.constr_sqlite)
+
+
+    def __close_connections(self):
+        if self.con_a is not None:
+            self.con_a.close()
+            self.con_a = None
+        if self.con_s is not None:
+            self.con_s.close()
+            self.con_a = None
 
 
     def __create_tables(self):
@@ -100,7 +108,7 @@ class MsAccess_migrate():
         """
         create table if not exists tables (
         name TEXT,
-        type TEXT,
+        table_type TEXT,
         primary_key TEXT,
         PRIMARY KEY (name))"""
 
@@ -174,9 +182,12 @@ class MsAccess_migrate():
         inserta los nombres de las tablas y su tipo en la tabla tables
         """
         insert = \
-        """insert into tables (name, type, primary_key) values (?, ?, ?)"""
+        """
+        insert into tables (name, table_type, primary_key) values (?, ?, ?)
+        """
+
         update = \
-        """update tables set type=?, primary_key=? where name=?"""
+        """update tables set table_type=?, primary_key=? where name=?"""
 
         cur = self.con_s.cursor()
         for table in tables:
@@ -202,24 +213,31 @@ class MsAccess_migrate():
         update columns set type_i=?, type_name=?, column_size=?, pg_type_name=?
         where table_name=? and col_name=?;
         """
-        d = MsAccess_migrate.__access_pg_types()
+        from traceback import format_exc
+
+        d = self.__access_pg_types()
         cur = self.con_a.cursor()
         cur_s = self.con_s.cursor()
-        for table in tables:
-            for row in cur.columns(table[0]):
-                if row.type_name in d:
-                    pg_col_type = d[row.type_name]
-                else:
-                    pg_col_type = ''
-                try:
-                    cur_s.execute(insert, (table[0], row.column_name,
-                                           row.sql_data_type, row.type_name,
-                                           row.column_size, pg_col_type))
-                except:
-                    cur_s.execute(update, (row.sql_data_type, row.type_name,
-                                           row.column_size, pg_col_type,
-                                           table[0], row.column_name))
+        try:
+            for table in tables:
+                for row in cur.columns(table[0]):
+                    if row.type_name in d:
+                        pg_col_type = d[row.type_name]
+                    else:
+                        pg_col_type = ''
+                    try:
+                        cur_s.execute(insert, (table[0], row.column_name,
+                                               row.sql_data_type, row.type_name,
+                                               row.column_size, pg_col_type))
+                    except:
+                        cur_s.execute(update, (row.sql_data_type, row.type_name,
+                                               row.column_size, pg_col_type,
+                                               table[0], row.column_name))
             self.con_s.commit()
+        except:
+            msg = format_exc()
+            msg1 = ';'.join(table)
+            raise ValueError(f'\nTabla: {msg1}\n{msg}')
 
 
     def __insert_into_relationships(self):
@@ -302,20 +320,22 @@ class MsAccess_migrate():
                   parent_cols, rship_name)
 
 
-    def write_create_tables_sql(self):
+    def create_tables_sql(self):
         """
         escribe un fichero sql con las instrucciones para crear las tablas
         """
-        def func_fmt(row):
+        def func_fmt(rowt: tuple) -> str:
+            row = list(rowt)
             row[0] = row[0].lower()
-            if row[3] == 'varchar' and row[1] > 0:
-                row[3] = f'{row[0]} varchar({row[1]:d})'
-            return row
+            if row[2] == 'varchar' and row[1] > 0:
+                row[2] = f'varchar({row[1]:d})'
+            return f'{row[0]} {row[2]}'
 
         select = \
         """
-        select name, primary_key from tables
-        where type = 'TABLE'
+        select name, primary_key
+        from tables
+        where table_type = 'TABLE'
         order by name
         """
 
@@ -326,33 +346,105 @@ class MsAccess_migrate():
         where table_name=?;
         """
 
+        select2 = \
+        """
+        select * from relationships
+        left join tables on relationships.referenced_table=tables.name
+        where tables.table_type = 'TABLE'
+        order by referenced_table;
+        """
+
         from os.path import join
 
         SPECIFIC_NAME = '_create_tables.sql'
         STM = 'DROP TABLE IF EXISTS {} CASCADE;\n\n'
         STM1 = 'CREATE TABLE {} (\n'
         STM2 = 'PRIMARY KEY ({}))\n'
+        add_foreignkey = 'alter table {} add constraint {} foreign key ({})' +\
+        ' references {} ({}) on update cascade;'
 
-        fo = join(self.dir_out, f'{self.base_name}'+f'{SPECIFIC_NAME}')
-        cur = self.con_s.cursor()
-        cur.execute(select)
-        tables = [table for table in cur.fetchall()]
-        headers = '\n'.join(self.SQL_FILE_HEADERS)
-        with open(fo, 'w') as f:
-            f.write(f'{headers}\n')
+        try:
+            self.__open_connections()
+            fo = join(self.dir_out, f'{self.base_name}'+f'{SPECIFIC_NAME}')
+            cur = self.con_s.cursor()
+            cur.execute(select)
+            tables = [table for table in cur.fetchall()]
+            headers = '\n'.join(self.SQL_FILE_HEADERS)
+            with open(fo, 'w') as f:
+                f.write(f'{headers}\n')
+                for table in tables:
+                    f.write('\n')
+                    f.write(STM.format(table[0].lower()))
+                    f.write(STM1.format(table[0].lower()))
+                    cur.execute(select1, (table[0],))
+                    rows = [func_fmt(row) for row in cur.fetchall()]
+                    columns = ',\n'.join(rows)
+                    f.write(f'{columns}')
+                    if table[1]:
+                        f.write(',\n')
+                        f.write(STM2.format(table[1]))
+                    else:
+                        f.write('\n)\n')
+
+                f.write('\n/* FOREIGN KEYS */\n')
+
+                cur.execute(select2)
+                for row in cur.fetchall():
+                    f.write(add_foreignkey.format(row[0], row[4], row[1],
+                                                  row[2], row[3]))
+                    f.write('\n')
+                f.write('COMMIT;\n')
+        except:
+            from traceback import format_exc
+            msg = format_exc()
+            logging.append(msg)
+        finally:
+            self.__close_connections()
+
+
+    def export_data_to_csv(self):
+        """
+        exporta los datos de la db access to csv
+        """
+        select = \
+        """
+        select name from tables where table_type='TABLE' order by name;
+        """
+
+        select1 = \
+        """
+        select * from {};
+        """
+        import csv
+        from os.path import join
+        try:
+            self.__open_connections()
+            cur = self.con_s.cursor()
+            cur.execute(select)
+            tables = [table[0] for table in cur.fetchall()]
+            column_names = [name[0] for name in cur.description]
+
+            cur = self.con_a.cursor()
             for table in tables:
-                f.write('\n')
-                f.write(STM.format(table[0]))
-                f.write(STM1.format(table[0]))
-                cur.execute(select1, (table[0],))
-                rows = [func_fmt(row) for row in cur.fetchall()]
-                columns = ',\n'.join(rows)
-                f.write(f'{columns}')
-                if table[1]:
-                    f.write(',\n')
-                    f.write(STM2.format(table[1]))
-                else:
-                    f.write('\n)\n')
+                fname = join(self.dir_out, f'{table}.csv')
+                cur.execute(select1.format(table))
+
+                with open(fname, 'w') as csvfile:
+                    writer = csv.writer(csvfile,
+                                        delimiter=',',
+                                        quotechar='"',
+                                        quoting=csv.QUOTE_NONNUMERIC,
+                                        lineterminator='\n')
+                    writer.writerow(column_names)
+                    for row in cur:
+                        writer.writerow(row)
+
+        except:
+            from traceback import format_exc
+            msg = format_exc()
+            logging.append(msg)
+        finally:
+            self.__close_connections()
 
 
     @staticmethod
@@ -386,168 +478,30 @@ class MsAccess_migrate():
         return d
 
 
-def ms_access_structure_get():
-    """
-    extracts tables column names and call function thar write each
-    table structure
-    input:
-        db (str): access data base file (must exist)
-        dir_out (str): output directory (must exists)
-    """
-    FILE_TABLES_NAMES = '_TABLES_NAMES.txt'
-    FILE_CREATE_TABLES = '_CREATE_TABLES.sql'
-    FILE_RELATIONSHIPS = '_CREATE_FOREIGNKEYS.sql'
-    FILE_COPYFROM = '_COPYFROM.txt'
-
-    from os.path import join
-    import pyodbc
-    from db_export_parameters import db, dir_out, wstruct, wdata
-    from db_export_parameters import trelationships
-
-    cns = constring_get(db)
-    con = pyodbc.connect(cns)
-    cur = con.cursor()
-    tables = [table[2] for table in cur.tables() if table[3] == 'TABLE']
-    print('{0:d} tables found'.format(len(tables)))
-
-    if wstruct == 1:
-        fo = open(join(dir_out, FILE_CREATE_TABLES), 'w')
-        fo.write('{}'.format('\n'.join(header_sql_file)))
-        focopyfrom = open(join(dir_out, FILE_COPYFROM), 'w')
-
-    if wdata == 1:
-        focopyfrom = open(join(dir_out, FILE_COPYFROM), 'w')
-
-    table_names = []
-    for i, table_name in enumerate(tables):
-        print('{0:d}. {1}'.format(i+1, table_name))
-        table_names.append(table_name)
-        # columnas
-        columns = [[row.ordinal_position, row.column_name, row.type_name,
-                    row.column_size, row.nullable, row.remarks]
-                   for row in cur.columns(table=table_name)]
-        # primary keys
-        pk_cols = [[row[7], row[8]]
-                   for row in cur.statistics(table_name)
-                   if row[5] is not None and
-                   row[5].upper() == 'PRIMARYKEY']
-
-        if wstruct == 1:
-            write_table_struct(fo, table_name, columns, pk_cols)
-
-        if wdata == 1:
-            field_names = [column[1] for column in columns]
-            write_data(table_name, field_names, con, dir_out)
-            sfield_names = ','.join(field_names)
-            write_copyfrom(table_name, sfield_names, dir_out, focopyfrom)
-
-    if wdata == 1:
-        focopyfrom.close()
-
-    if wstruct == 1:
-        fo.close()
-        fo = open(join(dir_out, FILE_RELATIONSHIPS), 'w')
-        fo.write('beguin;\n')
-        cur.execute('SELECT * FROM {};'.format(trelationships))
-        fks = [row for row in cur.fetchall()]
-        for row in fks:
-            fo.write('\n')
-            fo.write('alter table if exists {} '.
-                     format(row.szObject))
-            fo.write('drop constraint if exists {};\n'.
-                     format(row.szRelationship))
-
-            fo.write('alter table if exists {}\n'.
-                     format(row.szObject))
-            fo.write('add constraint {} '.
-                     format(row.szRelationship))
-            fo.write('foreign key ({}) '.
-                     format(row.szColumn))
-            fo.write('references {0} ({1});'.
-                     format(row.szReferencedObject, row.szReferencedColumn))
-            fo.write(2*'\n')
-            fo.write(NHYPHEN*'-' + '\n')
-        fo.write('commit;\n')
-        fo.close()
-
-    table_names_str = '\n'.join(table_names)
-    fo = open(join(dir_out, FILE_TABLES_NAMES), 'w')
-    fo.write('{}'.format(table_names_str))
-    fo.close()
-
-
-def translate_msa(atype, length):
-    """
-    translates ms access types to postgis types
-    """
-    ttypes = {'TEXT': 'varchar', 'VARCHAR': 'varchar',
-              'MEMO': 'varchar', 'LONGCHAR': 'varchar',
-              'BYTE': 'smallint', 'INTEGER': 'integer', 'LONG': 'bigint',
-              'SMALLINT': 'smallint',
-              'SINGLE': 'real', 'DOUBLE': 'double precision',
-              'REAL': 'double precision',
-              'CURRENCY': 'money', 'AUTONUMBER': 'serial',
-              'COUNTER': 'serial',
-              'DATETIME': 'timestamp',
-              'YES/NO': 'smallint'}
-    if atype in('TEXT', 'VARCHAR', 'MEMO', 'LONGCHAR') and length > 0:
-        return '{}({})'.format(ttypes[atype], length)
-    else:
-        return ttypes[atype]
-
-
-def write_table_struct(fo, table_name, columns, pk_cols):
-    """
-    writes table structure in text file fo
-    fo (object file): text file (must be open)
-    table_name (str)
-    columns [[]]: columns definition (defined in ms_access_structure_get)
-    """
-    fo.write(2*'\n')
-    fo.write('drop table if exists {}\nbeguin;\n'.format(table_name))
-    fo.write('create table if not exists ' + table_name + '(\n')
-    wcolumns = ['\t{} {}'.format(column[1],
-                translate_msa(column[2], column[3])) for column in columns]
-    fo.write(',\n'.join(wcolumns))
-    fo.write('\n')
-    pk_columns = [row[1] for row in pk_cols]
-    if len(pk_columns) > 0:
-        pk_cstr = ','.join(pk_columns)
-        fo.write('\tconstraint {0} primary key ({1})\n'.format(table_name,
-                 pk_cstr))
-    fo.write(');\n'+'commit;\n')
-    fo.write(NHYPHEN*'-' + '\n')
-
-
-def csv_file_name_get(dir_out, table_name):
-    from os.path import join
-    return join(dir_out, table_name + '.csv')
-
-
-def write_data(table_name, field_names, con, dir_out):
-    """
-    writes all table data
-    in
-    table_name (str)
-    field_names ([str,...])
-    con (object connexion to an access data base)
-    dir_out (str): directory to write data (must exists)
-    """
-    import csv
-    csv_file = csv_file_name_get(dir_out, table_name)
-
-    cur = con.cursor()
-    cur.execute('select * from [' + table_name + '];')
-
-    with open(csv_file, 'w') as csvfile:
-        writer = csv.writer(csvfile,
-                            delimiter=',',
-                            quotechar='"',
-                            quoting=csv.QUOTE_NONNUMERIC,
-                            lineterminator='\n')
-        writer.writerow(field_names)
-        for row in cur:
-            writer.writerow(row)
+#def write_data(table_name, field_names, con, dir_out):
+#    """
+#    writes all table data
+#    in
+#    table_name (str)
+#    field_names ([str,...])
+#    con (object connexion to an access data base)
+#    dir_out (str): directory to write data (must exists)
+#    """
+#    import csv
+#    csv_file = csv_file_name_get(dir_out, table_name)
+#
+#    cur = con.cursor()
+#    cur.execute('select * from [' + table_name + '];')
+#
+#    with open(csv_file, 'w') as csvfile:
+#        writer = csv.writer(csvfile,
+#                            delimiter=',',
+#                            quotechar='"',
+#                            quoting=csv.QUOTE_NONNUMERIC,
+#                            lineterminator='\n')
+#        writer.writerow(field_names)
+#        for row in cur:
+#            writer.writerow(row)
 
 
 def write_copyfrom(table_name, sfield_names, dir_out, fo):

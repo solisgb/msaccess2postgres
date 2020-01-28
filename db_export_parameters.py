@@ -6,26 +6,24 @@ también se explica el significado de cada parámetro
 """
 # _________________DATOS_______________________
 
-# ruta a la base de datos Access para hacer backup
-db = r'C:\Users\solis\Documents\DB\Ipasub97.mdb'
+# ruta de la base de datos Access a migrar
+db: str = r'C:\Users\solis\Documents\DB\Ipasub97.mdb'
 
-# directorio de resultados
-dir_out = r'C:\Users\solis\Documents\DB\bak'
+# directorio de resultados (debe existir)
+dir_out: str = r'C:\Users\solis\Documents\DB\bak'
 
 # ______________VARIABLES QUE CONTROLAN LAS ACCIONES DEL SCRIPT_______________
-"""get_types [True, False]
-   si 1 muestra los tipos de las tablas Access y su relación con los tipos
-   psql
-   si 1 el script no realiza ninguna acción más, independientemente de los
-   valores del resto de variables"""
-get_types = True
+# create_db_structure
+# la app crea primero un fichero sqlite con la estructura
+# de la db access; si True la crea por primera vez o sobreescribe la
+# existente
+create_db_structure: bool = False
 
-"""wstruct [True, False]
-   si True crea la la sentencia psql para crear cada una de las tablas de la
-   base de datos Access"""
-wstruct = False
+# write_sql
+# escribe la estructura de las tablas en un fichero sql apto para ser ejecutado
+# desde psql
+write_sql: bool = False
 
-""" wdata [True, False]
-    si False copia los datos de cada tabla en formato csv y crea un fichero
-    con las sentencias copy tabla (...) from file with (...)"""
-wdata = False
+# write_data_to_csv
+# copia los datos de cada tabla en un fichero csv
+write_data_to_csv: bool = True
