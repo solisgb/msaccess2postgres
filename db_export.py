@@ -121,6 +121,7 @@ class MsAccess_migrate():
         type_name TEXT,
         column_size INTEGER,
         pg_type_name TEXT,
+        col_number INTEGER,
         PRIMARY KEY (table_name, col_name),
         FOREIGN KEY(table_name) REFERENCES tables(name))
         """
@@ -205,12 +206,14 @@ class MsAccess_migrate():
         insert = \
         """
         insert into columns
-        (table_name, col_name, type_i, type_name, column_size, pg_type_name)
-        values (?, ?, ?, ?, ?, ?);
+        (table_name, col_name, type_i, type_name, column_size, pg_type_name,
+        col_number)
+        values (?, ?, ?, ?, ?, ?, ?);
         """
         update = \
         """
-        update columns set type_i=?, type_name=?, column_size=?, pg_type_name=?
+        update columns set type_i=?, type_name=?, column_size=?,
+            pg_type_name=?, col_number=?
         where table_name=? and col_name=?;
         """
         from traceback import format_exc
@@ -220,7 +223,7 @@ class MsAccess_migrate():
         cur_s = self.con_s.cursor()
         try:
             for table in tables:
-                for row in cur.columns(table[0]):
+                for i, row in enumerate(cur.columns(table[0])):
                     if row.type_name in d:
                         pg_col_type = d[row.type_name]
                     else:
@@ -228,10 +231,11 @@ class MsAccess_migrate():
                     try:
                         cur_s.execute(insert, (table[0], row.column_name,
                                                row.sql_data_type, row.type_name,
-                                               row.column_size, pg_col_type))
+                                               row.column_size, pg_col_type,
+                                               i))
                     except:
                         cur_s.execute(update, (row.sql_data_type, row.type_name,
-                                               row.column_size, pg_col_type,
+                                               row.column_size, pg_col_type, i,
                                                table[0], row.column_name))
             self.con_s.commit()
         except:
@@ -315,7 +319,7 @@ class MsAccess_migrate():
             parent_cols = [fila[3] for fila in cols]
             referenced_cols = ', '.join(referenced_cols)
             parent_cols = ', '.join(parent_cols)
-            rship_name = f'{referenced_table}_{parent_table}_{i:d}'
+            rship_name = f'fk_{referenced_table}_{parent_table}_{i:d}'
             yield(referenced_table, referenced_cols, parent_table,
                   parent_cols, rship_name)
 
@@ -324,12 +328,6 @@ class MsAccess_migrate():
         """
         escribe un fichero sql con las instrucciones para crear las tablas
         """
-        def func_fmt(rowt: tuple) -> str:
-            row = list(rowt)
-            row[0] = row[0].lower()
-            if row[2] == 'varchar' and row[1] > 0:
-                row[2] = f'varchar({row[1]:d})'
-            return f'{row[0]} {row[2]}'
 
         select = \
         """
@@ -343,7 +341,8 @@ class MsAccess_migrate():
         """
         select col_name, column_size, pg_type_name
         from columns
-        where table_name=?;
+        where table_name=?
+        order by col_number;
         """
 
         select2 = \
@@ -377,7 +376,8 @@ class MsAccess_migrate():
                     f.write(STM.format(table[0].lower()))
                     f.write(STM1.format(table[0].lower()))
                     cur.execute(select1, (table[0],))
-                    rows = [func_fmt(row) for row in cur.fetchall()]
+                    rows = [f'{row[0].lower()} {row[2]}'
+                            for row in cur.fetchall()]
                     columns = ',\n'.join(rows)
                     f.write(f'{columns}')
                     if table[1]:
@@ -413,21 +413,27 @@ class MsAccess_migrate():
 
         select1 = \
         """
-        select * from {};
+        select * from "{}";
         """
         import csv
         from os.path import join
+        from traceback import format_exc
+
         try:
             self.__open_connections()
             cur = self.con_s.cursor()
             cur.execute(select)
             tables = [table[0] for table in cur.fetchall()]
-            column_names = [name[0] for name in cur.description]
 
             cur = self.con_a.cursor()
             for table in tables:
                 fname = join(self.dir_out, f'{table}.csv')
-                cur.execute(select1.format(table))
+                column_names = [row.column_name for row in cur.columns(table)]
+                try:
+                    cur.execute(select1.format(table))
+                except:
+                    msg = format_exc()
+                    logging.append(f'tabla {table}\n{msg}')
 
                 with open(fname, 'w') as csvfile:
                     writer = csv.writer(csvfile,
@@ -447,6 +453,82 @@ class MsAccess_migrate():
             self.__close_connections()
 
 
+    def upsert_sql(self):
+        """
+        Crea los ficheros sql con la sentencia upsert
+        la tabla no tiene valores autonuméricos por lo que se inserta el valor
+            de la primary key
+        """
+
+        select = \
+        """
+        select name, primary_key from tables
+        where table_type='TABLE'
+        order by name;
+        """
+
+        select1 = \
+        """
+        select * from "{}";
+        """
+
+        upsert = \
+        """
+        insert into {} ({})
+        values ({}))
+        on conflict ({})
+        do
+        update set {};
+        """
+
+        from os.path import join
+        from traceback import format_exc
+
+        try:
+            self.__open_connections()
+            cur = self.con_s.cursor()
+            cur.execute(select)
+            tables = [table[0] for table in cur.fetchall()]
+            headers = '\n'.join(self.SQL_FILE_HEADERS)
+
+            cur = self.con_a.cursor()
+            for table in tables:
+                fname = join(self.dir_out, f'{table[0]}_upsert.sql')
+                cols = [(row.column_name, row.type_name)
+                        for row in cur.columns(table[0])]
+                col_names = [row[0] for row in cols]
+                col_names = ', '.join(col_names)
+                try:
+                    cur.execute(select1.format(table[0]))
+                except:
+                    msg = format_exc()
+                    logging.append(f'tabla {table[0]}\n{msg}')
+
+                with open(fname, 'w') as f:
+                    f.write(f'{headers}\n')
+
+                    for row in cur:
+                        insert_values = self.__insert_values_get(row)
+                        upsert_row = upsert.format(table[0], col_names )
+
+        except:
+            from traceback import format_exc
+            msg = format_exc()
+            logging.append(msg)
+        finally:
+            self.__close_connections()
+
+
+    @staticmethod
+    def __insert_values_get(row: list) -> str:
+        """
+        Forma una cadena de texto con los valores a insertar en una sentencia
+            insert
+        """
+        for item in row:
+            pass
+
+
     @staticmethod
     def __access_pg_types():
         d = {
@@ -461,7 +543,6 @@ class MsAccess_migrate():
              'INTEGER': 'int4',
              'LONGBINARY': 'bytea',
              'LONGTEXT': 'varchar',
-             'LONGTEXT': 'varchar',
              'SINGLE': 'float4',
              'SMALLINT': 'int2',
              'DOUBLE': 'float8',
@@ -473,42 +554,15 @@ class MsAccess_migrate():
              'LONGBINARY': 'bytea',
              'REAL': 'float4',
              'VARCHAR': 'varchar',
-             'VARBINARY': 'varchar'
+             'VARBINARY': 'bytea'
             }
         return d
 
-
-#def write_data(table_name, field_names, con, dir_out):
+#def write_copyfrom(table_name, sfield_names, dir_out, fo):
 #    """
-#    writes all table data
-#    in
-#    table_name (str)
-#    field_names ([str,...])
-#    con (object connexion to an access data base)
-#    dir_out (str): directory to write data (must exists)
+#    writes \copy .. from psql metacommand one for each table
 #    """
-#    import csv
+#    stm = ''.join(copyfrom)
 #    csv_file = csv_file_name_get(dir_out, table_name)
-#
-#    cur = con.cursor()
-#    cur.execute('select * from [' + table_name + '];')
-#
-#    with open(csv_file, 'w') as csvfile:
-#        writer = csv.writer(csvfile,
-#                            delimiter=',',
-#                            quotechar='"',
-#                            quoting=csv.QUOTE_NONNUMERIC,
-#                            lineterminator='\n')
-#        writer.writerow(field_names)
-#        for row in cur:
-#            writer.writerow(row)
-
-
-def write_copyfrom(table_name, sfield_names, dir_out, fo):
-    """
-    writes \copy .. from psql metacommand one for each table
-    """
-    stm = ''.join(copyfrom)
-    csv_file = csv_file_name_get(dir_out, table_name)
-    stm1 = stm.format(table_name, sfield_names, csv_file, sfield_names)
-    fo.write('{}\n\n'.format(stm1))
+#    stm1 = stm.format(table_name, sfield_names, csv_file, sfield_names)
+#    fo.write('{}\n\n'.format(stm1))

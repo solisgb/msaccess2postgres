@@ -42,10 +42,15 @@ if __name__ == "__main__":
         startTime = time()
 
         migrate = msa(par.db, par.dir_out)
+
         if par.create_db_structure:
             migrate.structure_to_sqlite()
+
         if par.write_sql:
             migrate.create_tables_sql()
+
+        if par.write_data_to_csv:
+            migrate.export_data_to_csv()
 
         xtime = time() - startTime
         print(f'The script took {xtime:.2f} secs')
