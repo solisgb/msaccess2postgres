@@ -17,13 +17,22 @@ dir_out: str = r'C:\Users\solis\Documents\DB\bak'
 # la app crea primero un fichero sqlite con la estructura
 # de la db access; si True la crea por primera vez o sobreescribe la
 # existente
-create_db_structure: bool = False
+create_db_structure: bool = True
 
 # write_sql
 # escribe la estructura de las tablas en un fichero sql apto para ser ejecutado
 # desde psql
-write_sql: bool = False
+write_sql: bool = True
+
+# schema_name
+# nombre del esquema donde se crearán las tablas si '' -> public
+schema_name: str = 'ipa'
 
 # write_data_to_csv
 # copia los datos de cada tabla en un fichero csv
-write_data_to_csv: bool = True
+write_data_to_csv: bool = False
+
+# py_upsert
+# inserta los datos de la dc access en la db postgres con python
+py_upsert: bool = False
+

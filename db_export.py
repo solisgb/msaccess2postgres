@@ -33,7 +33,7 @@ copyfrom = ("\copy {} ({}) ",
             "with (format csv, header, delimiter ',', encoding 'LATIN1',",
             " force_null ({}))")
 
-class MsAccess_migrate():
+class Migrate():
     """
     Lee la estructura de una db access para escribir las sentencias sql
         que permiten migrarla a otro rdbs
@@ -93,7 +93,7 @@ class MsAccess_migrate():
             self.con_a = None
         if self.con_s is not None:
             self.con_s.close()
-            self.con_a = None
+            self.con_s = None
 
 
     def __create_tables(self):
@@ -129,14 +129,13 @@ class MsAccess_migrate():
         create_table3 = \
         """
         create table if not exists relationships (
+        references_table TEXT,
+        references_cols TEXT,
         referenced_table TEXT,
         referenced_cols TEXT,
-        parent_table TEXT,
-        parent_cols TEXT,
-        my_rship_name TEXT,
-        PRIMARY KEY (referenced_table, referenced_cols),
-        FOREIGN KEY(referenced_table) REFERENCES tables(name),
-        FOREIGN KEY(parent_table) REFERENCES tables(name))
+        PRIMARY KEY (references_table, references_cols),
+        FOREIGN KEY(references_table) REFERENCES tables(name),
+        FOREIGN KEY(referenced_table) REFERENCES tables(name))
         """
 
         sqls = (create_table1, create_table2, create_table3)
@@ -218,7 +217,7 @@ class MsAccess_migrate():
         """
         from traceback import format_exc
 
-        d = self.__access_pg_types()
+        d = Migrate.__access_pg_types()
         cur = self.con_a.cursor()
         cur_s = self.con_s.cursor()
         try:
@@ -250,23 +249,22 @@ class MsAccess_migrate():
         """
         select = \
         """
-        SELECT szReferencedObject
+        SELECT szObject
         FROM MSysRelationships
-        GROUP BY szReferencedObject
-        ORDER BY szReferencedObject;
+        GROUP BY szObject
+        ORDER BY szObject;
         """
 
         insert = \
         """
-        insert into relationships (referenced_table, referenced_cols,
-            parent_table, parent_cols, my_rship_name)
-        values (?, ?, ?, ?, ?);
+        insert into relationships (references_table, references_cols,
+            referenced_table, referenced_cols)
+        values (?, ?, ?, ?);
         """
         update = \
         """
-        update relationships set parent_table=?, parent_cols=?,
-            my_rship_name=?
-        where referenced_table=? and referenced_cols=?;
+        update relationships set referenced_table=?, referenced_cols=?
+        where references_table=? and references_cols=?;
         """
 
         func_iter = self.__relationship_get
@@ -279,8 +277,8 @@ class MsAccess_migrate():
                 try:
                     cur.execute(insert, items)
                 except:
-                    cur.execute(update, (items[2], items[3], items[4],
-                                         items[0], items[1]))
+                    cur.execute(update, (items[2], items[3], items[0],
+                                         items[1]))
         self.con_s.commit()
 
 
@@ -293,14 +291,14 @@ class MsAccess_migrate():
         """
         select szRelationship
         from MSysRelationships
-        where szReferencedObject=?
+        where szObject=?
         group by szRelationship
         order by szRelationship
         """
 
         select1 = \
         """
-        select szReferencedObject, szReferencedColumn, szObject, szColumn
+        select szObject, szColumn, szReferencedObject, szReferencedColumn
         from MSysRelationships
         where szRelationship=?
         order by icolumn
@@ -311,22 +309,21 @@ class MsAccess_migrate():
         rships = [row for row in cur.fetchall()]
         for i, rship in enumerate(rships):
             cur.execute(select1, (rship[0],))
-            cols = [(row[0], row[1], row[2], row[3])
-                    for row in cur.fetchall()]
-            referenced_table = cols[0][0]
-            referenced_cols = [fila[1] for fila in cols]
-            parent_table = cols[0][2]
-            parent_cols = [fila[3] for fila in cols]
-            referenced_cols = ', '.join(referenced_cols)
-            parent_cols = ', '.join(parent_cols)
-            rship_name = f'fk_{referenced_table}_{parent_table}_{i:d}'
-            yield(referenced_table, referenced_cols, parent_table,
-                  parent_cols, rship_name)
+            cols = [row for row in cur.fetchall()]
+            references_table = cols[0][0]
+            references_cols = ', '.join([row1[1] for row1 in cols])
+            referenced_table = cols[0][2]
+            referenced_cols = ', '.join([row1[3] for row1 in cols])
+            yield(references_table, references_cols, referenced_table,
+                  referenced_cols)
 
 
-    def create_tables_sql(self):
+    def create_tables_sql(self, schema: str):
         """
         escribe un fichero sql con las instrucciones para crear las tablas
+        schema: nombre del esquema; si '' las tablas se crean es el esquema
+            public
+        Los nombres de las tablas se cambian a ascci en minúscula
         """
 
         select = \
@@ -347,20 +344,28 @@ class MsAccess_migrate():
 
         select2 = \
         """
-        select * from relationships
-        left join tables on relationships.referenced_table=tables.name
+        select references_table, references_cols, referenced_table,
+            referenced_cols
+        from relationships
+        left join tables on relationships.references_table=tables.name
         where tables.table_type = 'TABLE'
-        order by referenced_table;
+        order by references_table;
         """
 
         from os.path import join
 
         SPECIFIC_NAME = '_create_tables.sql'
-        STM = 'DROP TABLE IF EXISTS {} CASCADE;\n\n'
-        STM1 = 'CREATE TABLE {} (\n'
-        STM2 = 'PRIMARY KEY ({}))\n'
+        stm = 'DROP TABLE IF EXISTS {} CASCADE;\n'
+        stm1 = 'CREATE TABLE {} (\n'
+        stm2 = 'PRIMARY KEY ({}));\n'
         add_foreignkey = 'alter table {} add constraint {} foreign key ({})' +\
-        ' references {} ({}) on update cascade;'
+        ' references {} ({}) on update cascade;\n'
+        stm3 = 'create schema if not exists {};\n'
+        stm4 = 'alter table {} set schema {};\n'
+        if len(schema.strip()) == 0 or schema.lower() == 'public':
+            is_schema = False
+        else:
+            is_schema = True
 
         try:
             self.__open_connections()
@@ -371,35 +376,90 @@ class MsAccess_migrate():
             headers = '\n'.join(self.SQL_FILE_HEADERS)
             with open(fo, 'w') as f:
                 f.write(f'{headers}\n')
+                if is_schema:
+                    stm3 = stm3.format(schema.lower())
+                    f.write('\n{}\n'.format(stm3))
                 for table in tables:
+                    pg_table_name = self.to_ascii(table[0])
                     f.write('\n')
-                    f.write(STM.format(table[0].lower()))
-                    f.write(STM1.format(table[0].lower()))
+                    f.write(stm.format(pg_table_name))
+                    f.write(stm1.format(pg_table_name))
                     cur.execute(select1, (table[0],))
-                    rows = [f'{row[0].lower()} {row[2]}'
+                    rows = [f'{Migrate.to_ascii(row[0])} {row[2]}'
                             for row in cur.fetchall()]
                     columns = ',\n'.join(rows)
                     f.write(f'{columns}')
                     if table[1]:
                         f.write(',\n')
-                        f.write(STM2.format(table[1]))
+                        pk_columns = Migrate.pk_columns(table[1])
+                        f.write(stm2.format(pk_columns))
                     else:
-                        f.write('\n)\n')
+                        f.write('\n);\n')
 
                 f.write('\n/* FOREIGN KEYS */\n')
 
                 cur.execute(select2)
                 for row in cur.fetchall():
-                    f.write(add_foreignkey.format(row[0], row[4], row[1],
-                                                  row[2], row[3]))
-                    f.write('\n')
-                f.write('COMMIT;\n')
+                    f.write(add_foreignkey.format(Migrate.to_ascii(row[0]),
+                                                  Migrate.fk_name(row[0],
+                                                                  row[1]),
+                                                  Migrate.pk_columns(row[1]),
+                                                  Migrate.pk_columns(row[2]),
+                                                  Migrate.pk_columns(row[3])))
+
+                if is_schema:
+                    f.write('\n/* move tables to schema */\n')
+                    for table in tables:
+                        mytable = Migrate.to_ascii(table[0])
+                        f.write(stm.format(f'{schema}.{mytable}'))
+                        f.write(stm4.format(mytable, schema))
+
+                f.write('\nCOMMIT;\n')
+
         except:
             from traceback import format_exc
             msg = format_exc()
             logging.append(msg)
         finally:
             self.__close_connections()
+
+
+    @staticmethod
+    def to_ascii(name: str, replaces: tuple = ((' ', '_'), ('-', '_'))):
+        """
+        cambia name a un str con caracteres ascci, alguna sustitución
+            adicional y minúscula
+        """
+        from unidecode import unidecode
+        name = name.strip()
+        if name[0].isdigit():
+            name = 'd' + name
+        for item in replaces:
+            name = name.replace(item[0], item[1])
+        return unidecode(unidecode(name)).lower()
+
+
+    @staticmethod
+    def pk_columns(pk_cols_str: str) -> str:
+        """
+        Sea pk_cols un string formado por una serie de columnas separadas
+            por comas; la función forma una lista de columnas, les aplica la
+            función to_ascii y forma un string con los nuevos nombres de
+            columnas separados por comas
+        """
+        pk_columns = pk_cols_str.split(',')
+        return ', '.join([Migrate.to_ascii(col) for col in pk_columns])
+
+
+    @staticmethod
+    def fk_name(table: str, cols: str) -> str:
+        """
+        devuelve el nombre de una foreign key
+        """
+        mytable = Migrate.to_ascii(table)
+        columns = cols.split(',')
+        columns = '_'.join([Migrate.to_ascii(col) for col in columns])
+        return f'{mytable}_{columns}_fkeys'
 
 
     def export_data_to_csv(self):
@@ -453,7 +513,7 @@ class MsAccess_migrate():
             self.__close_connections()
 
 
-    def upsert_sql(self):
+    def upsert(self, section):
         """
         Crea los ficheros sql con la sentencia upsert
         la tabla no tiene valores autonuméricos por lo que se inserta el valor
@@ -472,61 +532,64 @@ class MsAccess_migrate():
         select * from "{}";
         """
 
-        upsert = \
-        """
-        insert into {} ({})
-        values ({}))
-        on conflict ({})
-        do
-        update set {};
-        """
+        insert = "insert into {} ({}) values ({});"
+        update = "update {} set {} where {};"
 
-        from os.path import join
+        import psycopg2
         from traceback import format_exc
 
         try:
+            con_pg = None
+            params = Migrate.con_params_get(section)
+            con_pg = psycopg2.connect(**params)
+            cur_pg = con_pg.cursor()
+
             self.__open_connections()
             cur = self.con_s.cursor()
             cur.execute(select)
-            tables = [table[0] for table in cur.fetchall()]
-            headers = '\n'.join(self.SQL_FILE_HEADERS)
+            tables = [table for table in cur.fetchall()]
 
             cur = self.con_a.cursor()
             for table in tables:
-                fname = join(self.dir_out, f'{table[0]}_upsert.sql')
-                cols = [(row.column_name, row.type_name)
+                mytable = Migrate.to_ascii(table[0])
+                cur.execute(select1, table[0])
+                cols = [Migrate.to_ascii(row.column_name)
                         for row in cur.columns(table[0])]
-                col_names = [row[0] for row in cols]
-                col_names = ', '.join(col_names)
-                try:
-                    cur.execute(select1.format(table[0]))
-                except:
-                    msg = format_exc()
-                    logging.append(f'tabla {table[0]}\n{msg}')
-
-                with open(fname, 'w') as f:
-                    f.write(f'{headers}\n')
-
-                    for row in cur:
-                        insert_values = self.__insert_values_get(row)
-                        upsert_row = upsert.format(table[0], col_names )
-
+                cols_str = ', '.join(cols)
+                placeholders = ', '.join(['?' for col in cols])
+                insert0 = insert.format(mytable, cols_str, placeholders)
+                for i, row in enumerate(cur.fetchall()):
+                    try:
+                        cur_pg.execute(insert0, row)
+                        to_update = False
+                    except:
+                        to_update = True
+                    if to_update:
+                        try:
+                            cur_pg.execute(update, row)
+                        except:
+                            logging.append(f'tabla {table}, fila {i:d}')
         except:
-            from traceback import format_exc
             msg = format_exc()
             logging.append(msg)
         finally:
             self.__close_connections()
+            if con_pg is not None:
+                con_pg.close()
 
 
     @staticmethod
-    def __insert_values_get(row: list) -> str:
+    def format_dates(row: list) -> list:
         """
-        Forma una cadena de texto con los valores a insertar en una sentencia
-            insert
+        cambia los tipos fecha a yyyy-mm-dd HH:MM:SS válidos para postgres
         """
-        for item in row:
-            pass
+        from datetime import datetime, date
+        for i, item in enumerate(row):
+            if isinstance(item, datetime):
+                row[i] = item.strftime('%Y-%m-%d %H:%M:%S')
+            elif isinstance(item, date):
+                row[i] = item.strftime('%Y-%m-%d 00:00:00')
+        return row
 
 
     @staticmethod
@@ -535,10 +598,10 @@ class MsAccess_migrate():
              'LONGBINARY': 'bytea',
              'BINARY': 'bytea',
              'BIT': 'int2',
-             'BYTE': 'bytea',
+             'BYTE': 'int2',
              'COUNTER': 'int4',
              'CURRENCY': 'numeric',
-             'DATETIME': 'timestamp',
+             'DATETIME': 'timestampz',
              'GUID': 'bytea',
              'INTEGER': 'int4',
              'LONGBINARY': 'bytea',
@@ -557,6 +620,28 @@ class MsAccess_migrate():
              'VARBINARY': 'bytea'
             }
         return d
+
+
+    @staticmethod
+    def con_params_get(section: str) -> str:
+        """
+        devuelve los parámetros de la conexiona una db postgres, obtenidos de
+            la sección section del fichero FILE
+        """
+        from configparser import ConfigParser
+        import pgcon_params as par
+        FILE = 'pgdb.ini'
+        parser = ConfigParser()
+        parser.read(FILE)
+        db = {}
+        if parser.has_section(section):
+            params = parser.items(par.section)
+            for param in params:
+                db[param[0]] = param[1]
+        else:
+            raise ValueError(f'No se encuentra section {section} en {FILE}')
+        return db
+
 
 #def write_copyfrom(table_name, sfield_names, dir_out, fo):
 #    """

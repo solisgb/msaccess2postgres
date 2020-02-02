@@ -37,7 +37,7 @@ if __name__ == "__main__":
     try:
         from time import time
         import db_export_parameters as par
-        from db_export import MsAccess_migrate as msa
+        from db_export import Migrate as msa
 
         startTime = time()
 
@@ -47,7 +47,7 @@ if __name__ == "__main__":
             migrate.structure_to_sqlite()
 
         if par.write_sql:
-            migrate.create_tables_sql()
+            migrate.create_tables_sql(par.schema_name)
 
         if par.write_data_to_csv:
             migrate.export_data_to_csv()
