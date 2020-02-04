@@ -4,10 +4,13 @@ Created on Sat Feb  9 13:12:53 2019
 
 @author: Solis
 El módulo permite:
-1 Crear una sb sqlite con la estructura de una db ms access
-2 Crear ficheros sql para recrear la estructura de la db access en otro
-    rdbs
-3 Exporta los datos de la db access a ficheros csv
+1.	Crea una bd sqlite a partir de la estructura de una db ms Access; a partir
+    de esta db se hace la migración a postgres
+2.	Crea un fichero sql para recrear la estructura de la db access en postgres
+3.	Exporta los datos de la db access a ficheros csv (un fichero por tabla)
+4.	Exporta los datos de la db Access a postgres mediante una función upsert.
+    Esta opción permite identificar de una vez problemas en la migración de
+    los datos entre las 2 db.
 
 NOTA IMPORTANTE
 Para leer las foreign keys debes, en ms access:
@@ -18,6 +21,10 @@ Para leer las foreign keys debes, en ms access:
     información -> administrar usuarios y permisos ->
     permisos y usuarios de grupo, como administrador, tipo de objeto tabla,
     nombre del objeto MysRelationShips, marcar leer diseño y leer datos
+
+PARA EL PROGRAMADOR
+Los nombres de las tablas y las columnas de access se pasan a nombres válidos
+    de postgres utilizando la función to_ascii
 """
 import pyodbc
 import sqlite3
@@ -513,12 +520,12 @@ class Migrate():
             self.__close_connections()
 
 
-    def upsert(self, section):
+    def py_upsert(self, file_ini: str, section: str):
         """
-        Crea los ficheros sql con la sentencia upsert
-        la tabla no tiene valores autonuméricos por lo que se inserta el valor
-            de la primary key
+        Inserta nuevos registros o actualiza los existentes en la db postgres
+            leyendo directamente de la db access
         """
+        FILE_ERRORS = 'py_upsert_errors.txt'
 
         select = \
         """
@@ -535,14 +542,18 @@ class Migrate():
         insert = "insert into {} ({}) values ({});"
         update = "update {} set {} where {};"
 
+        from os.path import join
         import psycopg2
         from traceback import format_exc
 
         try:
             con_pg = None
-            params = Migrate.con_params_get(section)
+            fo = None
+            params = Migrate.con_params_get(file_ini, section)
             con_pg = psycopg2.connect(**params)
             cur_pg = con_pg.cursor()
+
+            fo = open(join(self.dir_out, FILE_ERRORS), 'w')
 
             self.__open_connections()
             cur = self.con_s.cursor()
@@ -552,23 +563,40 @@ class Migrate():
             cur = self.con_a.cursor()
             for table in tables:
                 mytable = Migrate.to_ascii(table[0])
+                if section:
+                    mytable = section + '.' + mytable
                 cur.execute(select1, table[0])
                 cols = [Migrate.to_ascii(row.column_name)
                         for row in cur.columns(table[0])]
+                ii = [i for i, row in enumerate(cur.columns(table)) if
+                      row.data_type == 'DATETIME']
                 cols_str = ', '.join(cols)
                 placeholders = ', '.join(['?' for col in cols])
                 insert0 = insert.format(mytable, cols_str, placeholders)
                 for i, row in enumerate(cur.fetchall()):
+                    if ii:
+                        Migrate.format_dates(ii, row)
                     try:
                         cur_pg.execute(insert0, row)
                         to_update = False
-                    except:
-                        to_update = True
+                    except psycopg2.Error as er:
+                        if not table[0]:
+                            fo.write(f'{table[0]}\t{i+1:d}\t{er.pgcode}' +\
+                                     f'\t{er.diag.message_primary}')
+                            to_update = False
+                        else:
+                            to_update = True
                     if to_update:
+                        urow = Migrate.sort_row([table[1], cols, row])
                         try:
-                            cur_pg.execute(update, row)
-                        except:
-                            logging.append(f'tabla {table}, fila {i:d}')
+                            cur_pg.execute(update, urow)
+                        except psycopg2.Error as er:
+                            fo.write(f'{table[0]}\t{i+1:d}\t{er.pgcode}' +\
+                                     f'\t{er.diag.message_primary}')
+        except psycopg2.Error as er:
+            msg = format_exc()
+            msg1 = f'{er.pgcode}\n{er.diag.message_primary}\n{msg}'
+            logging.append(msg1)
         except:
             msg = format_exc()
             logging.append(msg)
@@ -576,20 +604,35 @@ class Migrate():
             self.__close_connections()
             if con_pg is not None:
                 con_pg.close()
+            if fo is not None:
+                fo.close()
 
 
     @staticmethod
-    def format_dates(row: list) -> list:
+    def format_dates(ii: list, row: list):
         """
         cambia los tipos fecha a yyyy-mm-dd HH:MM:SS válidos para postgres
         """
         from datetime import datetime, date
-        for i, item in enumerate(row):
-            if isinstance(item, datetime):
-                row[i] = item.strftime('%Y-%m-%d %H:%M:%S')
-            elif isinstance(item, date):
-                row[i] = item.strftime('%Y-%m-%d 00:00:00')
-        return row
+        for i in ii:
+            if isinstance(row[i], datetime):
+                row[i] = row[i].strftime('%Y-%m-%d %H:%M:%S')
+            elif isinstance(row[i], date):
+                row[i] = row[i].strftime('%Y-%m-%d 00:00:00')
+
+
+    @staticmethod
+    def sort_row(pkeys: str, col_names: list, row: list) -> list:
+        """
+        reordena las columnas devueltas por la select para adecuarlas a un
+            update de una tabla con primary keys
+        """
+        pk_columns = [Migrate.to_ascii(col) for col in pkeys.split(',')]
+        kcolumns = [row[i] for i, col_name in enumerate(col_names)
+                    if col_name in pk_columns]
+        ucolumns = [row[i] for i, col_name in enumerate(col_names)
+                    if col_name not in pk_columns]
+        return ucolumns + kcolumns
 
 
     @staticmethod
@@ -623,23 +666,22 @@ class Migrate():
 
 
     @staticmethod
-    def con_params_get(section: str) -> str:
+    def con_params_get(file_ini: str, section: str) -> str:
         """
         devuelve los parámetros de la conexiona una db postgres, obtenidos de
             la sección section del fichero FILE
         """
         from configparser import ConfigParser
-        import pgcon_params as par
-        FILE = 'pgdb.ini'
         parser = ConfigParser()
-        parser.read(FILE)
+        parser.read(file_ini)
         db = {}
         if parser.has_section(section):
-            params = parser.items(par.section)
+            params = parser.items(section)
             for param in params:
                 db[param[0]] = param[1]
         else:
-            raise ValueError(f'No se encuentra section {section} en {FILE}')
+            raise ValueError(f'No se encuentra section {section} en' +\
+                             f' {file_ini}')
         return db
 
 

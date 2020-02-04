@@ -34,5 +34,8 @@ write_data_to_csv: bool = False
 
 # py_upsert
 # inserta los datos de la dc access en la db postgres con python
-py_upsert: bool = False
-
+# file_ini fichero ini con los datos de la conexión a la db postgres
+# section nombre de la sección del fichero ini con los datos de la conexión
+py_upsert: bool = True
+file_ini = 'pgdb.ini'
+section = 'h2geo'
