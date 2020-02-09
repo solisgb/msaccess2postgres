@@ -75,10 +75,19 @@ class Migrate():
         Lee la estructura de la db access y crea un fichero sqlite con la
             información de la estructura (no los datos)
         """
+        from os import remove
+        try:
+            remove(self.constr_sqlite)
+        except OSError:
+            logging.append('No se ha podido borrar {self.constr_sqlite}')
+
         try:
             self.__open_connections()
             self.__create_tables()
             self.__populate_tables()
+            print('Se ha creado la db sqlite; para trasladar los cambios ' +\
+                  'a postgres debes ejecutar el fichero sql para crear las' +\
+                  'nuevas tablas')
         except:
             from traceback import format_exc
             msg = format_exc()
@@ -520,7 +529,85 @@ class Migrate():
             self.__close_connections()
 
 
-    def py_upsert(self, file_ini: str, section: str):
+    def py_upsert(self, schema: str, file_ini: str, section: str):
+        """
+        Inserta nuevos registros o actualiza los existentes en la db postgres
+            leyendo directamente de la db access
+        """
+
+        select = \
+        """
+        select name, primary_key from tables
+        where table_type='TABLE'
+        order by name;
+        """
+
+        select1 = \
+        """
+        select * from "{}";
+        """
+
+        insert = "insert into {} ({}) values ({});"
+
+        upsert = \
+        "insert into {} ({}) values ({}) on conflict ({}) do " +\
+        "update set {};"
+
+        import psycopg2
+        from traceback import format_exc
+
+        try:
+            con_pg = None
+            params = Migrate.con_params_get(file_ini, section)
+            con_pg = psycopg2.connect(**params)
+            cur_pg = con_pg.cursor()
+
+            self.__open_connections()
+            cur = self.con_s.cursor()
+            cur.execute(select)
+            tables = [table for table in cur.fetchall()]
+
+            cur = self.con_a.cursor()
+            for table in tables:
+                mytable = Migrate.to_ascii(table[0])
+                if schema:
+                    mytable = schema + '.' + mytable
+                cols = [Migrate.to_ascii(row.column_name)
+                        for row in cur.columns(table[0])]
+#                ii = [i for i, row in enumerate(cur.columns(table[0])) if
+#                      row.data_type == 'DATETIME']
+                cols_str = ', '.join(cols)
+                placeholders = ', '.join(['%s' for col in cols])
+                if table[1]:
+                    pk_str = Migrate.primary_key_as_pg(table[1])
+                    cols_2_update_str = Migrate.cols_to_update(table[1], cols)
+                    insert0 = upsert.format(mytable, cols_str, placeholders,
+                                            pk_str, cols_2_update_str)
+                else:
+                    insert0 = insert.format(mytable, cols_str, placeholders)
+                cur.execute(select1.format(table[0]))
+                for i, row in enumerate(cur.fetchall()):
+                    if table[1]:
+                        uvalues = Migrate.upsert_values(table[1], cols, row)
+                    else:
+                        uvalues = row
+                    cur_pg.execute(insert0, uvalues)
+
+                con_pg.commit()
+        except psycopg2.Error as er:
+            msg = format_exc()
+            msg1 = f'{mytable}, {er.pgcode}: {er.diag.message_primary}\n{msg}'
+            logging.append(msg1)
+        except:
+            msg = format_exc()
+            logging.append(msg)
+        finally:
+            self.__close_connections()
+            if con_pg is not None:
+                con_pg.close()
+
+
+    def py_upsert1(self, schema: str, file_ini: str, section: str):
         """
         Inserta nuevos registros o actualiza los existentes en la db postgres
             leyendo directamente de la db access
@@ -563,16 +650,22 @@ class Migrate():
             cur = self.con_a.cursor()
             for table in tables:
                 mytable = Migrate.to_ascii(table[0])
-                if section:
-                    mytable = section + '.' + mytable
-                cur.execute(select1, table[0])
+                if schema:
+                    mytable = schema + '.' + mytable
                 cols = [Migrate.to_ascii(row.column_name)
                         for row in cur.columns(table[0])]
-                ii = [i for i, row in enumerate(cur.columns(table)) if
+                ii = [i for i, row in enumerate(cur.columns(table[0])) if
                       row.data_type == 'DATETIME']
                 cols_str = ', '.join(cols)
-                placeholders = ', '.join(['?' for col in cols])
+                placeholders = ', '.join(['%s' for col in cols])
                 insert0 = insert.format(mytable, cols_str, placeholders)
+                if table[1]:
+                    cols_2_update_str = Migrate.cols_to_update(table[1], cols)
+                    where_cols_str = Migrate.update_where_columns(table[1],
+                                                                   cols)
+                    update0 = update.format(mytable, cols_2_update_str,
+                                            where_cols_str)
+                cur.execute(select1.format(table[0]))
                 for i, row in enumerate(cur.fetchall()):
                     if ii:
                         Migrate.format_dates(ii, row)
@@ -580,19 +673,21 @@ class Migrate():
                         cur_pg.execute(insert0, row)
                         to_update = False
                     except psycopg2.Error as er:
-                        if not table[0]:
+                        con_pg.rollback()
+                        if not table[1]:
                             fo.write(f'{table[0]}\t{i+1:d}\t{er.pgcode}' +\
                                      f'\t{er.diag.message_primary}')
                             to_update = False
                         else:
                             to_update = True
                     if to_update:
-                        urow = Migrate.sort_row([table[1], cols, row])
+                        urow = Migrate.sort_row(table[1], cols, row)
                         try:
-                            cur_pg.execute(update, urow)
+                            cur_pg.execute(update0, urow)
                         except psycopg2.Error as er:
                             fo.write(f'{table[0]}\t{i+1:d}\t{er.pgcode}' +\
                                      f'\t{er.diag.message_primary}')
+                con_pg.commit()
         except psycopg2.Error as er:
             msg = format_exc()
             msg1 = f'{er.pgcode}\n{er.diag.message_primary}\n{msg}'
@@ -622,6 +717,37 @@ class Migrate():
 
 
     @staticmethod
+    def primary_key_as_pg(pkeys: str) -> str:
+        """
+        transforma la expresión access de las primary key a postgres
+        """
+        pk_columns = [Migrate.to_ascii(col) for col in pkeys.split(',')]
+        return ', '.join(pk_columns)
+
+
+    @staticmethod
+    def cols_to_update(pkeys: str, col_names: list) -> str:
+        """
+        columnas para actualizar con parámetros
+        """
+        pk_columns = [Migrate.to_ascii(col) for col in pkeys.split(',')]
+        ucolumns = [f'{col_name} = %s' for col_name in col_names
+                    if col_name not in pk_columns]
+        return ', '.join(ucolumns)
+
+
+    @staticmethod
+    def update_where_columns(pkeys: str, col_names: list) -> str:
+        """
+        condición where: columnas con parameters
+        """
+        pk_columns = [Migrate.to_ascii(col) for col in pkeys.split(',')]
+        kcolumns = [f'{col_name} = %s' for col_name in col_names
+                    if col_name in pk_columns]
+        return ', '.join(kcolumns)
+
+
+    @staticmethod
     def sort_row(pkeys: str, col_names: list, row: list) -> list:
         """
         reordena las columnas devueltas por la select para adecuarlas a un
@@ -633,6 +759,18 @@ class Migrate():
         ucolumns = [row[i] for i, col_name in enumerate(col_names)
                     if col_name not in pk_columns]
         return ucolumns + kcolumns
+
+
+    @staticmethod
+    def upsert_values(pkeys: str, col_names: list, row: list) -> list:
+        """
+        Forma la lista de valores para la sentencia upsert
+        """
+        pk_columns = [Migrate.to_ascii(col) for col in pkeys.split(',')]
+        icolumns = [row[i] for i, col_name in enumerate(col_names)]
+        ucolumns = [row[i] for i, col_name in enumerate(col_names)
+                    if col_name not in pk_columns]
+        return icolumns + ucolumns
 
 
     @staticmethod

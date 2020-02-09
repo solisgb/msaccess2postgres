@@ -17,12 +17,12 @@ dir_out: str = r'C:\Users\solis\Documents\DB\bak'
 # la app crea primero un fichero sqlite con la estructura
 # de la db access; si True la crea por primera vez o sobreescribe la
 # existente
-create_db_structure: bool = True
+create_db_structure: bool = False
 
 # write_sql
 # escribe la estructura de las tablas en un fichero sql apto para ser ejecutado
 # desde psql
-write_sql: bool = True
+write_sql: bool = False
 
 # schema_name
 # nombre del esquema donde se crearán las tablas si '' -> public
@@ -36,6 +36,6 @@ write_data_to_csv: bool = False
 # inserta los datos de la dc access en la db postgres con python
 # file_ini fichero ini con los datos de la conexión a la db postgres
 # section nombre de la sección del fichero ini con los datos de la conexión
-py_upsert: bool = True
+py_upsert: bool = False
 file_ini = 'pgdb.ini'
-section = 'h2geo'
+section = 'h2ogeo'
