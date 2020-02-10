@@ -535,13 +535,6 @@ class Migrate():
             leyendo directamente de la db access
         """
 
-        select = \
-        """
-        select name, primary_key from tables
-        where table_type='TABLE'
-        order by name;
-        """
-
         select1 = \
         """
         select * from "{}";
@@ -564,8 +557,7 @@ class Migrate():
 
             self.__open_connections()
             cur = self.con_s.cursor()
-            cur.execute(select)
-            tables = [table for table in cur.fetchall()]
+            tables = self.tables_input_order()
 
             cur = self.con_a.cursor()
             for table in tables:
@@ -607,102 +599,6 @@ class Migrate():
                 con_pg.close()
 
 
-    def py_upsert1(self, schema: str, file_ini: str, section: str):
-        """
-        Inserta nuevos registros o actualiza los existentes en la db postgres
-            leyendo directamente de la db access
-        """
-        FILE_ERRORS = 'py_upsert_errors.txt'
-
-        select = \
-        """
-        select name, primary_key from tables
-        where table_type='TABLE'
-        order by name;
-        """
-
-        select1 = \
-        """
-        select * from "{}";
-        """
-
-        insert = "insert into {} ({}) values ({});"
-        update = "update {} set {} where {};"
-
-        from os.path import join
-        import psycopg2
-        from traceback import format_exc
-
-        try:
-            con_pg = None
-            fo = None
-            params = Migrate.con_params_get(file_ini, section)
-            con_pg = psycopg2.connect(**params)
-            cur_pg = con_pg.cursor()
-
-            fo = open(join(self.dir_out, FILE_ERRORS), 'w')
-
-            self.__open_connections()
-            cur = self.con_s.cursor()
-            cur.execute(select)
-            tables = [table for table in cur.fetchall()]
-
-            cur = self.con_a.cursor()
-            for table in tables:
-                mytable = Migrate.to_ascii(table[0])
-                if schema:
-                    mytable = schema + '.' + mytable
-                cols = [Migrate.to_ascii(row.column_name)
-                        for row in cur.columns(table[0])]
-                ii = [i for i, row in enumerate(cur.columns(table[0])) if
-                      row.data_type == 'DATETIME']
-                cols_str = ', '.join(cols)
-                placeholders = ', '.join(['%s' for col in cols])
-                insert0 = insert.format(mytable, cols_str, placeholders)
-                if table[1]:
-                    cols_2_update_str = Migrate.cols_to_update(table[1], cols)
-                    where_cols_str = Migrate.update_where_columns(table[1],
-                                                                   cols)
-                    update0 = update.format(mytable, cols_2_update_str,
-                                            where_cols_str)
-                cur.execute(select1.format(table[0]))
-                for i, row in enumerate(cur.fetchall()):
-                    if ii:
-                        Migrate.format_dates(ii, row)
-                    try:
-                        cur_pg.execute(insert0, row)
-                        to_update = False
-                    except psycopg2.Error as er:
-                        con_pg.rollback()
-                        if not table[1]:
-                            fo.write(f'{table[0]}\t{i+1:d}\t{er.pgcode}' +\
-                                     f'\t{er.diag.message_primary}')
-                            to_update = False
-                        else:
-                            to_update = True
-                    if to_update:
-                        urow = Migrate.sort_row(table[1], cols, row)
-                        try:
-                            cur_pg.execute(update0, urow)
-                        except psycopg2.Error as er:
-                            fo.write(f'{table[0]}\t{i+1:d}\t{er.pgcode}' +\
-                                     f'\t{er.diag.message_primary}')
-                con_pg.commit()
-        except psycopg2.Error as er:
-            msg = format_exc()
-            msg1 = f'{er.pgcode}\n{er.diag.message_primary}\n{msg}'
-            logging.append(msg1)
-        except:
-            msg = format_exc()
-            logging.append(msg)
-        finally:
-            self.__close_connections()
-            if con_pg is not None:
-                con_pg.close()
-            if fo is not None:
-                fo.close()
-
-
     @staticmethod
     def format_dates(ii: list, row: list):
         """
@@ -714,6 +610,96 @@ class Migrate():
                 row[i] = row[i].strftime('%Y-%m-%d %H:%M:%S')
             elif isinstance(row[i], date):
                 row[i] = row[i].strftime('%Y-%m-%d 00:00:00')
+
+
+    def tables_input_order(self) -> list:
+        """
+        devuelva las tablas en el order de carga de acuerdo a las foreign
+            keys
+        """
+
+        create_table = \
+        """
+        create table tables (
+        name TEXT,
+        primary_key TEXT,
+        id INTEGER,
+        PRIMARY KEY (name))"""
+
+        insert = \
+        "insert into tables (name, primary_key, id) values (?, ?, ?)"
+
+        select = \
+        "select DISTINCT name, primary_key " +\
+        "from tables t " +\
+        "left join relationships r on r.references_table = name " +\
+        "where table_type='TABLE' and r.references_table is null " +\
+        "order by name;"
+
+        select1 = \
+        "select DISTINCT name, primary_key " +\
+        "from tables t " +\
+        "left join relationships r on r.references_table = name " +\
+        "where table_type='TABLE' and r.references_table is not null " +\
+        "order by name;"
+
+        select2 = \
+        """select r.referenced_table
+        from tables t
+        left join relationships r on r.references_table = t.name
+        where t.name = ?
+        order by r.referenced_table;"""
+
+        select3 = \
+        "select name " +\
+        "from tables t " +\
+        "where name=?;"
+
+        select4 = \
+        "select name, primary_key " +\
+        "from tables " +\
+        "order by id;"
+
+        con_mem = sqlite3.connect(':memory:')
+        cur_mem = con_mem.cursor()
+        cur_mem.execute(create_table)
+
+        cur = self.con_s.cursor()
+        cur.execute(select)
+        tables = [(table[0], table[1], i)
+                  for i, table in enumerate(cur.fetchall())]
+        for table in tables:
+            cur_mem.execute(insert, table)
+        con_mem.commit()
+        n = len(tables) - 1
+
+        cur.execute(select1)
+        tables2add = [(table[0], table[1], i)
+                      for i, table in enumerate(cur.fetchall())]
+
+        not_added_tables = []
+        while True:
+            for t2add in tables2add:
+                cur.execute(select2, (t2add[0],))
+                tt = [item for item in cur.fetchall()]
+                to_insert = True
+                for tt1 in tt:
+                    tinserted = cur_mem.execute(select3, (tt1[0],)).fetchall()
+                    if not tinserted:
+                        not_added_tables.append(t2add)
+                        to_insert = False
+                        break
+                if to_insert:
+                    n += 1
+                    cur_mem.execute(insert, t2add)
+            if not_added_tables:
+                tables2add = [t1 for t1 in not_added_tables]
+                not_added_tables = []
+            else:
+                break
+        con_mem.commit()
+        tables = [table for teble in cur_mem.execute(select4).fetchall()]
+        return tables
 
 
     @staticmethod
