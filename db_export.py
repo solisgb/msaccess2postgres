@@ -534,6 +534,11 @@ class Migrate():
         Inserta nuevos registros o actualiza los existentes en la db postgres
             leyendo directamente de la db access
         """
+        from os.path import join
+        import psycopg2
+        from traceback import format_exc
+
+        FILE = '_tablas_ordenadas_insertar.txt'
 
         select1 = \
         """
@@ -546,11 +551,9 @@ class Migrate():
         "insert into {} ({}) values ({}) on conflict ({}) do " +\
         "update set {};"
 
-        import psycopg2
-        from traceback import format_exc
-
         try:
             con_pg = None
+            mytable = ''
             params = Migrate.con_params_get(file_ini, section)
             con_pg = psycopg2.connect(**params)
             cur_pg = con_pg.cursor()
@@ -558,10 +561,14 @@ class Migrate():
             self.__open_connections()
             cur = self.con_s.cursor()
             tables = self.tables_input_order()
+            with open(join(self.dir_out, FILE), 'w') as f:
+                for table in tables:
+                    f.write(f'{table[0]}\n')
 
             cur = self.con_a.cursor()
             for table in tables:
                 mytable = Migrate.to_ascii(table[0])
+                print(mytable)
                 if schema:
                     mytable = schema + '.' + mytable
                 cols = [Migrate.to_ascii(row.column_name)
@@ -617,6 +624,7 @@ class Migrate():
         devuelva las tablas en el order de carga de acuerdo a las foreign
             keys
         """
+        MAXITER =25
 
         create_table = \
         """
@@ -674,11 +682,16 @@ class Migrate():
         n = len(tables) - 1
 
         cur.execute(select1)
-        tables2add = [(table[0], table[1], i)
-                      for i, table in enumerate(cur.fetchall())]
+        tables2add = [table for table in cur.fetchall()]
 
         not_added_tables = []
+        i = 0
         while True:
+            i += 1
+            if i > MAXITER:
+                raise ValueError('tables_input_order, se ha alcanzado ' +\
+                                 'el número máx. de itereccaciones ' +\
+                                 f'{MAXITER:d}')
             for t2add in tables2add:
                 cur.execute(select2, (t2add[0],))
                 tt = [item for item in cur.fetchall()]
@@ -691,14 +704,14 @@ class Migrate():
                         break
                 if to_insert:
                     n += 1
-                    cur_mem.execute(insert, t2add)
+                    cur_mem.execute(insert, (t2add[0], t2add[1], n))
+                    con_mem.commit()
             if not_added_tables:
                 tables2add = [t1 for t1 in not_added_tables]
                 not_added_tables = []
             else:
                 break
-        con_mem.commit()
-        tables = [table for teble in cur_mem.execute(select4).fetchall()]
+        tables = [table for table in cur_mem.execute(select4).fetchall()]
         return tables
 
 
@@ -768,7 +781,7 @@ class Migrate():
              'BYTE': 'int2',
              'COUNTER': 'int4',
              'CURRENCY': 'numeric',
-             'DATETIME': 'timestampz',
+             'DATETIME': 'timestamptz',
              'GUID': 'bytea',
              'INTEGER': 'int4',
              'LONGBINARY': 'bytea',
