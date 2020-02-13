@@ -25,6 +25,11 @@ Para leer las foreign keys debes, en ms access:
 PARA EL PROGRAMADOR
 Los nombres de las tablas y las columnas de access se pasan a nombres válidos
     de postgres utilizando la función to_ascii
+
+LIMITACION DEL MODULO EN LA CARGA DE DATOS CON LA FUNCION py_upsert
+Los valores de las claves primarias y de las columnas en las claves foráneas
+    se convierten en minúsculas. En la actualidad esto solo funciona bien si
+    las claves foráneas implican a una sola columna
 """
 import pyodbc
 import sqlite3
@@ -532,7 +537,10 @@ class Migrate():
     def py_upsert(self, schema: str, file_ini: str, section: str):
         """
         Inserta nuevos registros o actualiza los existentes en la db postgres
-            leyendo directamente de la db access
+            leyendo directamente los datos de la db access
+        Las contenidos de las tablas se insertan considerando claves foráneas
+            de una sola columna; si no se cumple hay que modificar la
+            programación
         """
         from os.path import join
         import psycopg2
@@ -550,6 +558,9 @@ class Migrate():
         upsert = \
         "insert into {} ({}) values ({}) on conflict ({}) do " +\
         "update set {};"
+
+        upsert1 = \
+        "insert into {} ({}) values ({}) on conflict ({}) do nothing;"
 
         try:
             con_pg = None
@@ -580,14 +591,23 @@ class Migrate():
                 if table[1]:
                     pk_str = Migrate.primary_key_as_pg(table[1])
                     cols_2_update_str = Migrate.cols_to_update(table[1], cols)
-                    insert0 = upsert.format(mytable, cols_str, placeholders,
-                                            pk_str, cols_2_update_str)
+                    if cols_2_update_str:
+                        insert0 = upsert.format(mytable, cols_str,
+                                                placeholders, pk_str,
+                                                cols_2_update_str)
+                        on_conflict_update = True
+                    else:
+                        insert0 = upsert1.format(mytable, cols_str,
+                                                 placeholders, pk_str)
+                        on_conflict_update = False
                 else:
                     insert0 = insert.format(mytable, cols_str, placeholders)
                 cur.execute(select1.format(table[0]))
                 for i, row in enumerate(cur.fetchall()):
                     if table[1]:
-                        uvalues = Migrate.upsert_values(table[1], cols, row)
+                        uvalues = Migrate.upsert_values(table[1], table[2],
+                                                        cols, row,
+                                                        on_conflict_update)
                     else:
                         uvalues = row
                     cur_pg.execute(insert0, uvalues)
@@ -631,11 +651,13 @@ class Migrate():
         create table tables (
         name TEXT,
         primary_key TEXT,
+        references_column TEXT,
         id INTEGER,
         PRIMARY KEY (name))"""
 
         insert = \
-        "insert into tables (name, primary_key, id) values (?, ?, ?)"
+        "insert into tables (name, primary_key, id, references_column) " +\
+        "values (?, ?, ?, ?)"
 
         select = \
         "select DISTINCT name, primary_key " +\
@@ -645,7 +667,7 @@ class Migrate():
         "order by name;"
 
         select1 = \
-        "select DISTINCT name, primary_key " +\
+        "select DISTINCT name, primary_key, r.references_cols " +\
         "from tables t " +\
         "left join relationships r on r.references_table = name " +\
         "where table_type='TABLE' and r.references_table is not null " +\
@@ -674,7 +696,7 @@ class Migrate():
 
         cur = self.con_s.cursor()
         cur.execute(select)
-        tables = [(table[0], table[1], i)
+        tables = [(table[0], table[1], None, i)
                   for i, table in enumerate(cur.fetchall())]
         for table in tables:
             cur_mem.execute(insert, table)
@@ -690,7 +712,7 @@ class Migrate():
             i += 1
             if i > MAXITER:
                 raise ValueError('tables_input_order, se ha alcanzado ' +\
-                                 'el número máx. de itereccaciones ' +\
+                                 'el número máx. de iterecciones ' +\
                                  f'{MAXITER:d}')
             for t2add in tables2add:
                 cur.execute(select2, (t2add[0],))
@@ -704,7 +726,7 @@ class Migrate():
                         break
                 if to_insert:
                     n += 1
-                    cur_mem.execute(insert, (t2add[0], t2add[1], n))
+                    cur_mem.execute(insert, (t2add[0], t2add[1], t2add[2], n))
                     con_mem.commit()
             if not_added_tables:
                 tables2add = [t1 for t1 in not_added_tables]
@@ -761,15 +783,31 @@ class Migrate():
 
 
     @staticmethod
-    def upsert_values(pkeys: str, col_names: list, row: list) -> list:
+    def upsert_values(pkeys: str, references_col: str, col_names: list,
+                      row: list, on_conflict_update: bool) -> list:
         """
         Forma la lista de valores para la sentencia upsert
+        Los valores de las claves principales y de las claves ajenas se
+            convierten en minúsculas
         """
         pk_columns = [Migrate.to_ascii(col) for col in pkeys.split(',')]
-        icolumns = [row[i] for i, col_name in enumerate(col_names)]
-        ucolumns = [row[i] for i, col_name in enumerate(col_names)
+        data2insert = [row[i] for i, col_name in enumerate(col_names)]
+        i2lower = [i for i, col_name in enumerate(col_names)
+                   if col_name in pk_columns]
+        for i in i2lower:
+            data2insert[i] = data2insert[i].lower()
+
+        if references_col is not None:
+            for i, col_name in enumerate(col_names):
+                if col_name == references_col:
+                    data2insert[i] = data2insert[i].lower()
+                    break
+
+        if not on_conflict_update:
+            return data2insert
+        data2update = [row[i] for i, col_name in enumerate(col_names)
                     if col_name not in pk_columns]
-        return icolumns + ucolumns
+        return data2insert + data2update
 
 
     @staticmethod
@@ -777,7 +815,7 @@ class Migrate():
         d = {
              'LONGBINARY': 'bytea',
              'BINARY': 'bytea',
-             'BIT': 'int2',
+             'BIT': 'boolean',
              'BYTE': 'int2',
              'COUNTER': 'int4',
              'CURRENCY': 'numeric',
