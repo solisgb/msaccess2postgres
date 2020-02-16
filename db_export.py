@@ -35,10 +35,6 @@ import pyodbc
 import sqlite3
 import littleLogging as logging
 
-SQL_FILE_HEADERS = ('SET CLIENT_ENCODING TO UTF8;',
-                    'SET STANDARD_CONFORMING_STRINGS TO ON;',
-                    'BEGIN;')
-
 # molde para fichero FILE_COPYFROM metacomando de psql
 copyfrom = ("\copy {} ({}) ",
             "from '{}' ",
@@ -54,7 +50,25 @@ class Migrate():
                         'SET STANDARD_CONFORMING_STRINGS TO ON;')
 
 
-    def __init__(self, dbaccess: str, dir_out: str):
+    def __init__(self, dbaccess: str, dir_out: str, file_ini: str,
+                 section: str):
+        """
+        args
+        dbaccess: ruta y nombre de la db access a migrar
+        dir_out: directorio de resultados -debe existir-
+        file_ini: fichero con los datos de la conexión a la db postgres
+            donde se van a migrar los datos
+        section: sección de file_ini con los datos de la conexión
+        propiedades
+        constr_access: cadena de conexión a la db access
+        constr_sqlite: idem a una db sqlite que crea el programa
+        con_a: conexión a la db access
+        con_s: conexión a la db sqlite
+        dir_out: var args
+        base_name: nombre de la db access sin extensión
+        file_ini: ver args
+        section: ver args
+        """
         from os.path import isdir, isfile, join, split, splitext
 
         if not isfile(dbaccess):
@@ -73,11 +87,13 @@ class Migrate():
         self.con_s = None
         self.dir_out = dir_out
         self.base_name = f'{name}'
+        self.file_ini = file_ini
+        self.section = section
 
 
     def structure_to_sqlite(self):
         """
-        Lee la estructura de la db access y crea un fichero sqlite con la
+        Lee la estructura de la db access y crea 1 fichero sqlite con la
             información de la estructura (no los datos)
         """
         from os import remove
@@ -339,9 +355,9 @@ class Migrate():
                   referenced_cols)
 
 
-    def create_tables_sql(self, schema: str):
+    def structure_to_sql(self, schema: str):
         """
-        escribe un fichero sql con las instrucciones para crear las tablas
+        escribe 2 ficheros sql con las instrucciones para crear las tablas
         schema: nombre del esquema; si '' las tablas se crean es el esquema
             public
         Los nombres de las tablas se cambian a ascci en minúscula
@@ -375,34 +391,36 @@ class Migrate():
 
         from os.path import join
 
-        SPECIFIC_NAME = '_create_tables.sql'
+        output_names = ('_migrate01.sql', '_migrate03.sql')
+        headers = 'BEGIN;\nSET CLIENT_ENCODING TO UTF8;\n' +\
+                  'SET STANDARD_CONFORMING_STRINGS TO ON;\n'
         stm = 'DROP TABLE IF EXISTS {} CASCADE;\n'
         stm1 = 'CREATE TABLE {} (\n'
         stm2 = 'PRIMARY KEY ({}));\n'
-        add_foreignkey = 'alter table {} add constraint {} foreign key ({})' +\
-        ' references {} ({}) on update cascade;\n'
-        stm3 = 'create schema if not exists {};\n'
-        stm4 = 'alter table {} set schema {};\n'
-        if len(schema.strip()) == 0 or schema.lower() == 'public':
-            is_schema = False
+        add_foreignkey = 'ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({})' +\
+        ' REFERENCES {} ({}) ON UPDATE CASCADE;\n'
+        stm3 = 'CREATE SCHEMA IF NOT EXISTS {};\n'
+        stm4 = 'ALTER TABLE {} SET SCHEMA {};\n'
+        if schema is None:
+            myschema = ''
+        elif schema.lower() == 'public':
+            myschema = ''
         else:
-            is_schema = True
+            myschema = schema.strip().lower()
 
         try:
             self.__open_connections()
-            fo = join(self.dir_out, f'{self.base_name}'+f'{SPECIFIC_NAME}')
+            fo = join(self.dir_out, f'{self.base_name}' + f'{output_names[0]}')
             cur = self.con_s.cursor()
             cur.execute(select)
             tables = [table for table in cur.fetchall()]
-            headers = '\n'.join(self.SQL_FILE_HEADERS)
             with open(fo, 'w') as f:
                 f.write(f'{headers}\n')
-                if is_schema:
-                    stm3 = stm3.format(schema.lower())
-                    f.write('\n{}\n'.format(stm3))
+                if myschema:
+                    stm3 = stm3.format(myschema)
+                    f.write('{}\n'.format(stm3))
                 for table in tables:
                     pg_table_name = self.to_ascii(table[0])
-                    f.write('\n')
                     f.write(stm.format(pg_table_name))
                     f.write(stm1.format(pg_table_name))
                     cur.execute(select1, (table[0],))
@@ -415,9 +433,13 @@ class Migrate():
                         pk_columns = Migrate.pk_columns(table[1])
                         f.write(stm2.format(pk_columns))
                     else:
-                        f.write('\n);\n')
+                        f.write('\n);')
+                    f.write('\n')
+                f.write('COMMIT;\n')
 
-                f.write('\n/* FOREIGN KEYS */\n')
+            fo = join(self.dir_out, f'{self.base_name}' + f'{output_names[1]}')
+            with open(fo, 'w') as f:
+                f.write(f'{headers}\n')
 
                 cur.execute(select2)
                 for row in cur.fetchall():
@@ -428,11 +450,11 @@ class Migrate():
                                                   Migrate.pk_columns(row[2]),
                                                   Migrate.pk_columns(row[3])))
 
-                if is_schema:
-                    f.write('\n/* move tables to schema */\n')
+                if myschema:
+                    f.write('\n')
                     for table in tables:
                         mytable = Migrate.to_ascii(table[0])
-                        f.write(stm.format(f'{schema}.{mytable}'))
+                        f.write(stm.format(f'{myschema}.{mytable}'))
                         f.write(stm4.format(mytable, schema))
 
                 f.write('\nCOMMIT;\n')
@@ -534,13 +556,10 @@ class Migrate():
             self.__close_connections()
 
 
-    def py_upsert(self, schema: str, file_ini: str, section: str):
+    def py_upsert(self, file_ini: str, section: str):
         """
         Inserta nuevos registros o actualiza los existentes en la db postgres
             leyendo directamente los datos de la db access
-        Las contenidos de las tablas se insertan considerando claves foráneas
-            de una sola columna; si no se cumple hay que modificar la
-            programación
         """
         from os.path import join
         import psycopg2
@@ -580,12 +599,9 @@ class Migrate():
             for table in tables:
                 mytable = Migrate.to_ascii(table[0])
                 print(mytable)
-                if schema:
-                    mytable = schema + '.' + mytable
                 cols = [Migrate.to_ascii(row.column_name)
                         for row in cur.columns(table[0])]
-#                ii = [i for i, row in enumerate(cur.columns(table[0])) if
-#                      row.data_type == 'DATETIME']
+
                 cols_str = ', '.join(cols)
                 placeholders = ', '.join(['%s' for col in cols])
                 if table[1]:
@@ -605,8 +621,7 @@ class Migrate():
                 cur.execute(select1.format(table[0]))
                 for i, row in enumerate(cur.fetchall()):
                     if table[1]:
-                        uvalues = Migrate.upsert_values(table[1], table[2],
-                                                        cols, row,
+                        uvalues = Migrate.upsert_values(table[1], cols, row,
                                                         on_conflict_update)
                     else:
                         uvalues = row
@@ -651,13 +666,12 @@ class Migrate():
         create table tables (
         name TEXT,
         primary_key TEXT,
-        references_column TEXT,
         id INTEGER,
         PRIMARY KEY (name))"""
 
         insert = \
-        "insert into tables (name, primary_key, id, references_column) " +\
-        "values (?, ?, ?, ?)"
+        "insert into tables (name, primary_key, id) " +\
+        "values (?, ?, ?)"
 
         select = \
         "select DISTINCT name, primary_key " +\
@@ -667,7 +681,7 @@ class Migrate():
         "order by name;"
 
         select1 = \
-        "select DISTINCT name, primary_key, r.references_cols " +\
+        "select DISTINCT name, primary_key " +\
         "from tables t " +\
         "left join relationships r on r.references_table = name " +\
         "where table_type='TABLE' and r.references_table is not null " +\
@@ -696,7 +710,7 @@ class Migrate():
 
         cur = self.con_s.cursor()
         cur.execute(select)
-        tables = [(table[0], table[1], None, i)
+        tables = [(table[0], table[1], i)
                   for i, table in enumerate(cur.fetchall())]
         for table in tables:
             cur_mem.execute(insert, table)
@@ -726,7 +740,7 @@ class Migrate():
                         break
                 if to_insert:
                     n += 1
-                    cur_mem.execute(insert, (t2add[0], t2add[1], t2add[2], n))
+                    cur_mem.execute(insert, (t2add[0], t2add[1], n))
                     con_mem.commit()
             if not_added_tables:
                 tables2add = [t1 for t1 in not_added_tables]
@@ -783,32 +797,116 @@ class Migrate():
 
 
     @staticmethod
-    def upsert_values(pkeys: str, references_col: str, col_names: list,
-                      row: list, on_conflict_update: bool) -> list:
+    def upsert_values(pkeys: str, col_names: list, row: list,
+                      on_conflict_update: bool) -> list:
         """
         Forma la lista de valores para la sentencia upsert
-        Los valores de las claves principales y de las claves ajenas se
-            convierten en minúsculas
         """
         pk_columns = [Migrate.to_ascii(col) for col in pkeys.split(',')]
         data2insert = [row[i] for i, col_name in enumerate(col_names)]
-        i2lower = [i for i, col_name in enumerate(col_names)
-                   if col_name in pk_columns]
-        for i in i2lower:
-            data2insert[i] = data2insert[i].lower()
-
-        if references_col is not None:
-            for i, col_name in enumerate(col_names):
-                if col_name == references_col:
-                    data2insert[i] = data2insert[i].lower()
-                    break
-
         if not on_conflict_update:
             return data2insert
         data2update = [row[i] for i, col_name in enumerate(col_names)
-                    if col_name not in pk_columns]
+                       if col_name not in pk_columns]
         return data2insert + data2update
 
+
+    def column_contents_2lowercase(self, pyupdate: bool, sqlupdate: bool):
+        """
+        Convierte a minúscula los contenidos de las columnas que son claves
+            primarias o ajenas
+        """
+        import psycopg2
+        from traceback import format_exc
+
+        create_table = \
+        """
+        create table tables (
+        name TEXT,
+        col TEXT,
+        PRIMARY KEY (name, col));"""
+
+        select = \
+        """
+        select name where name=? and col=?;
+        """
+
+        insert = \
+        """
+        insert into tables (name, col) values (?, ?);
+        """
+
+        select1 = \
+        """
+        select distinct r.referenced_table, r.referenced_cols, c.pg_type_name
+        from relationships r left join columns c
+        	on r.referenced_table = c.table_name and
+               r.referenced_cols = c.col_name
+        order by referenced_table, referenced_cols;
+        """
+
+        update = \
+        """
+        update {} set {} = lower({});
+        """
+
+        output_name = '_migrate03.sql'
+
+        if not pyupdate and not sqlupdate:
+            print('No se hace nada, pyupdate y sqlupdate tienen valor False')
+            return
+
+        try:
+            con_pg = None
+            fo = None
+            params = Migrate.con_params_get(file_ini, section)
+            con_pg = psycopg2.connect(**params)
+            cur_pg = con_pg.cursor()
+
+            con_mem = sqlite3.connect(':memory:')
+            cur_mem = con_mem.cursor()
+            cur_mem.execute(create_table)
+
+            if sqlupdate:
+                fo = join(self.dir_out, f'{self.base_name}' + f'{output_name}')
+                fo = open(fo, 'w')
+                f.write('//Changes to lowercase contents in primary and ' \+
+                        ' foreign key columns\n')
+                f.write('BEGUIN;\n')
+
+            cur = self.con_s.cursor()
+            cur.execute(select)
+            tables = [row for row in enumerate(cur.fetchall())]
+            for row in tables:
+                inserted_col = [irow for irow in
+                                cur_mem.execute(select, row).fetchall()]
+                if inserted_col:
+                    continue
+                if row[2] in ('varchar', 'text'):
+                    ustm = update.format(row[0], row[1], row[1])
+                    if pyupdate:
+                        cur_pg.execute(ustm)
+                        cur_mem.execute(insert, (row[0], row[1]))
+                    if sqlupdate:
+                        fo.write(f'{ustm}\n')
+            if pyupdate:
+                con_pg.commit()
+            if sqlupdate:
+                fo.write('COMMIT;\n')
+
+        except psycopg2.Error as er:
+            msg = format_exc()
+            msg1 = f'{mytable}, {er.pgcode}: {er.diag.message_primary}\n{msg}'
+            logging.append(msg1)
+        except:
+            msg = format_exc()
+            logging.append(msg)
+        finally:
+            self.__close_connections()
+            if con_pg is not None:
+                con_pg.close()
+            if sqlupdate and fo is not None:
+                fo.close()
 
     @staticmethod
     def __access_pg_types():
