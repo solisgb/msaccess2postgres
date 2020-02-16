@@ -33,6 +33,7 @@ Los valores de las claves primarias y de las columnas en las claves foráneas
 """
 import pyodbc
 import sqlite3
+from traceback import format_exc
 import littleLogging as logging
 
 # molde para fichero FILE_COPYFROM metacomando de psql
@@ -40,6 +41,13 @@ copyfrom = ("\copy {} ({}) ",
             "from '{}' ",
             "with (format csv, header, delimiter ',', encoding 'LATIN1',",
             " force_null ({}))")
+
+# nombres de los ficheros sql según contenido {acción: nombre}
+sql_files =  {'create_tables': '_migrate01.sql',
+              'upsert_data': '_migrate02.sql',
+              'lower_key_data': '_migrate03.sql',
+              'create_fk': '_migrate04.sql'}
+
 
 class Migrate():
     """
@@ -110,17 +118,16 @@ class Migrate():
                   'a postgres debes ejecutar el fichero sql para crear las' +\
                   'nuevas tablas')
         except:
-            from traceback import format_exc
             msg = format_exc()
             logging.append(msg)
         finally:
             self.__close_connections()
 
 
-    def __open_connections(self):
-        if self.con_a is None:
+    def __open_connections(self, odbc: bool=True, sqlite: bool=True):
+        if odbc and self.con_a is None:
             self.con_a = pyodbc.connect(self.constr_access)
-        if self.con_s is None:
+        if sqlite and self.con_s is None:
             self.con_s = sqlite3.connect(self.constr_sqlite)
 
 
@@ -139,7 +146,6 @@ class Migrate():
         args
         con_s, conexión creada to self.db
         """
-        from traceback import format_exc
 
         create_table1 = \
         """
@@ -252,7 +258,6 @@ class Migrate():
             pg_type_name=?, col_number=?
         where table_name=? and col_name=?;
         """
-        from traceback import format_exc
 
         d = Migrate.__access_pg_types()
         cur = self.con_a.cursor()
@@ -391,7 +396,6 @@ class Migrate():
 
         from os.path import join
 
-        output_names = ('_migrate01.sql', '_migrate03.sql')
         headers = 'BEGIN;\nSET CLIENT_ENCODING TO UTF8;\n' +\
                   'SET STANDARD_CONFORMING_STRINGS TO ON;\n'
         stm = 'DROP TABLE IF EXISTS {} CASCADE;\n'
@@ -410,7 +414,8 @@ class Migrate():
 
         try:
             self.__open_connections()
-            fo = join(self.dir_out, f'{self.base_name}' + f'{output_names[0]}')
+            fo = join(self.dir_out, f'{self.base_name}' +\
+                      f'{sql_files["create_tables"]}')
             cur = self.con_s.cursor()
             cur.execute(select)
             tables = [table for table in cur.fetchall()]
@@ -437,7 +442,8 @@ class Migrate():
                     f.write('\n')
                 f.write('COMMIT;\n')
 
-            fo = join(self.dir_out, f'{self.base_name}' + f'{output_names[1]}')
+            fo = join(self.dir_out, f'{self.base_name}' + \
+                      f'{sql_files["create_fk"]}')
             with open(fo, 'w') as f:
                 f.write(f'{headers}\n')
 
@@ -460,7 +466,6 @@ class Migrate():
                 f.write('\nCOMMIT;\n')
 
         except:
-            from traceback import format_exc
             msg = format_exc()
             logging.append(msg)
         finally:
@@ -468,16 +473,17 @@ class Migrate():
 
 
     @staticmethod
-    def to_ascii(name: str, replaces: tuple = ((' ', '_'), ('-', '_'))):
+    def to_ascii(name: str):
         """
-        cambia name a un str con caracteres ascci, alguna sustitución
+        cambia name a un str con caracteres ascii, alguna sustitución
             adicional y minúscula
         """
         from unidecode import unidecode
+        replacement_rules = ((' ', '_'), ('-', '_'))
         name = name.strip()
         if name[0].isdigit():
             name = 'd' + name
-        for item in replaces:
+        for item in replacement_rules:
             name = name.replace(item[0], item[1])
         return unidecode(unidecode(name)).lower()
 
@@ -520,7 +526,6 @@ class Migrate():
         """
         import csv
         from os.path import join
-        from traceback import format_exc
 
         try:
             self.__open_connections()
@@ -549,21 +554,19 @@ class Migrate():
                         writer.writerow(row)
 
         except:
-            from traceback import format_exc
             msg = format_exc()
             logging.append(msg)
         finally:
             self.__close_connections()
 
 
-    def py_upsert(self, file_ini: str, section: str):
+    def py_upsert(self):
         """
         Inserta nuevos registros o actualiza los existentes en la db postgres
             leyendo directamente los datos de la db access
         """
         from os.path import join
         import psycopg2
-        from traceback import format_exc
 
         FILE = '_tablas_ordenadas_insertar.txt'
 
@@ -584,7 +587,7 @@ class Migrate():
         try:
             con_pg = None
             mytable = ''
-            params = Migrate.con_params_get(file_ini, section)
+            params = Migrate.con_params_get(self.file_ini, self.section)
             con_pg = psycopg2.connect(**params)
             cur_pg = con_pg.cursor()
 
@@ -814,26 +817,63 @@ class Migrate():
     def column_contents_2lowercase(self, pyupdate: bool, sqlupdate: bool):
         """
         Convierte a minúscula los contenidos de las columnas que son claves
-            primarias o ajenas
+            primarias o ajenas y ejecuta también la función trim
         """
+        from os.path import join
         import psycopg2
-        from traceback import format_exc
 
-        create_table = \
-        """
-        create table tables (
-        name TEXT,
-        col TEXT,
-        PRIMARY KEY (name, col));"""
+        update = "UPDATE {} SET {} = lower(trim({}));"
 
-        select = \
-        """
-        select name where name=? and col=?;
-        """
+        if not pyupdate and not sqlupdate:
+            print('No se hace nada, pyupdate y sqlupdate tienen valor False')
+            return
 
-        insert = \
+        try:
+            con_pg = None
+            fo = None
+
+            if pyupdate:
+                params = Migrate.con_params_get(self.file_ini, self.section)
+                con_pg = psycopg2.connect(**params)
+                cur_pg = con_pg.cursor()
+
+            if sqlupdate:
+                fo = join(self.dir_out, f'{self.base_name}' + \
+                          f'{sql_files["lower_key_data"]}')
+                fo = open(fo, 'w')
+                fo.write('BEGUIN;\n\n')
+
+            tables = self.table_columns_2_lower()
+            for row in tables:
+                print(row[0])
+                ustm = update.format(row[0], row[1], row[1])
+                if pyupdate:
+                    cur_pg.execute(ustm)
+                if sqlupdate:
+                    fo.write(f'{ustm}\n')
+            if pyupdate:
+                con_pg.commit()
+            if sqlupdate:
+                fo.write('\nCOMMIT;\n')
+
+        except psycopg2.Error as er:
+            msg = format_exc()
+            msg1 = f'{er.pgcode}: {er.diag.message_primary}\n{msg}'
+            logging.append(msg1)
+        except:
+            msg = format_exc()
+            logging.append(msg)
+        finally:
+            if con_pg is not None:
+                con_pg.close()
+            if sqlupdate and fo is not None:
+                fo.close()
+
+
+    def table_columns_2_lower(self):
         """
-        insert into tables (name, col) values (?, ?);
+        devuelve una lista con las tablas y columnas cuyos contenidos se
+            pasarán a minúsculas
         """
 
         select1 = \
@@ -845,68 +885,36 @@ class Migrate():
         order by referenced_table, referenced_cols;
         """
 
-        update = \
+        select2 = \
         """
-        update {} set {} = lower({});
+        select distinct r.references_table, r.references_cols, c.pg_type_name
+        from relationships r left join columns c
+        	on r.references_table = c.table_name and
+            r.references_cols = c.col_name
+        order by references_table, references_cols;
         """
-
-        output_name = '_migrate03.sql'
-
-        if not pyupdate and not sqlupdate:
-            print('No se hace nada, pyupdate y sqlupdate tienen valor False')
-            return
+        valid_types = ('varchar', 'text')
 
         try:
-            con_pg = None
-            fo = None
-            params = Migrate.con_params_get(file_ini, section)
-            con_pg = psycopg2.connect(**params)
-            cur_pg = con_pg.cursor()
-
-            con_mem = sqlite3.connect(':memory:')
-            cur_mem = con_mem.cursor()
-            cur_mem.execute(create_table)
-
-            if sqlupdate:
-                fo = join(self.dir_out, f'{self.base_name}' + f'{output_name}')
-                fo = open(fo, 'w')
-                f.write('//Changes to lowercase contents in primary and ' \+
-                        ' foreign key columns\n')
-                f.write('BEGUIN;\n')
+            self.__open_connections(odbc=False, sqlite=True)
 
             cur = self.con_s.cursor()
-            cur.execute(select)
-            tables = [row for row in enumerate(cur.fetchall())]
-            for row in tables:
-                inserted_col = [irow for irow in
-                                cur_mem.execute(select, row).fetchall()]
-                if inserted_col:
-                    continue
-                if row[2] in ('varchar', 'text'):
-                    ustm = update.format(row[0], row[1], row[1])
-                    if pyupdate:
-                        cur_pg.execute(ustm)
-                        cur_mem.execute(insert, (row[0], row[1]))
-                    if sqlupdate:
-                        fo.write(f'{ustm}\n')
-            if pyupdate:
-                con_pg.commit()
-            if sqlupdate:
-                fo.write('COMMIT;\n')
+            cur.execute(select1)
+            tables1 = [(self.to_ascii(row[0]), self.to_ascii(row[1]))
+                       for row in cur.fetchall() if row[2] in valid_types]
 
-        except psycopg2.Error as er:
-            msg = format_exc()
-            msg1 = f'{mytable}, {er.pgcode}: {er.diag.message_primary}\n{msg}'
-            logging.append(msg1)
+            cur.execute(select2)
+            tables2 = [(self.to_ascii(row[0]), self.to_ascii(row[1]))
+                       for row in cur.fetchall() if row[2] in valid_types]
+
+            return tables1 + tables2
         except:
             msg = format_exc()
             logging.append(msg)
+            raise ValueError(msg)
         finally:
             self.__close_connections()
-            if con_pg is not None:
-                con_pg.close()
-            if sqlupdate and fo is not None:
-                fo.close()
+
 
     @staticmethod
     def __access_pg_types():
