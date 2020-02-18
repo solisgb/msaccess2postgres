@@ -18,7 +18,7 @@ create_db_structure: bool = False
 # write_sql
 # si True escribe la estructura de las tablas en 2 ficheros sql que deben ser
 # ejecutados
-write_sql: bool = False
+write_sql: bool = True
 
 # write_data_to_csv
 # si True graba los datos de cada tabla en un fichero csv
@@ -26,14 +26,14 @@ write_data_to_csv: bool = False
 
 # py_upsert
 # Si Truw ejecuta un upsert de los datos en la db access en la db postgres
-py_upsert: bool = False
+upsert_py: bool = False
 
 # keys2lower. Convierte las contenidos de las columnas implicadas en las
 # claves primarias o ajenas en minúsculas (2 opciones):
 # keys2lower_py si True la conversón se hece directamente con python
 # keys2lower_sql si True se escribe un fichero sql
-keys2lower_py: bool = True
-keys2lower_sql: bool = True
+keys2lower_py: bool = False
+keys2lower_sql: bool = False
 
 
 if __name__ == "__main__":
@@ -45,7 +45,7 @@ if __name__ == "__main__":
 
         startTime = time()
 
-        migrate = msa(par.db, par.dir_out)
+        migrate = msa(par.db, par.dir_out, par.file_ini, par.section)
 
         if create_db_structure:
             migrate.structure_to_sqlite()
@@ -56,8 +56,8 @@ if __name__ == "__main__":
         if write_data_to_csv:
             migrate.export_data_to_csv()
 
-        if py_upsert:
-            migrate.py_upsert(par.file_ini, par.section)
+        if upsert_py:
+            migrate.upsert(upsert_py)
 
         if keys2lower_py or keys2lower_sql:
             migrate.column_contents_2lowercase(keys2lower_py, keys2lower_sql)

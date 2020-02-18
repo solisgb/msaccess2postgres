@@ -401,9 +401,11 @@ class Migrate():
         stm = 'DROP TABLE IF EXISTS {} CASCADE;\n'
         stm1 = 'CREATE TABLE {} (\n'
         stm2 = 'PRIMARY KEY ({}));\n'
-        add_foreignkey = 'ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({})' +\
+        drop_constraint = 'ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}' +\
+                          ' CASCADE;\n'
+        add_constraint = 'ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({})' +\
         ' REFERENCES {} ({}) ON UPDATE CASCADE;\n'
-        stm3 = 'CREATE SCHEMA IF NOT EXISTS {};\n'
+        create_schema = 'CREATE SCHEMA IF NOT EXISTS {};\n'
         stm4 = 'ALTER TABLE {} SET SCHEMA {};\n'
         if schema is None:
             myschema = ''
@@ -422,8 +424,8 @@ class Migrate():
             with open(fo, 'w') as f:
                 f.write(f'{headers}\n')
                 if myschema:
-                    stm3 = stm3.format(myschema)
-                    f.write('{}\n'.format(stm3))
+                    create_schema = create_schema.format(myschema)
+                    f.write('{create_schema}\n')
                 for table in tables:
                     pg_table_name = self.to_ascii(table[0])
                     f.write(stm.format(pg_table_name))
@@ -449,7 +451,10 @@ class Migrate():
 
                 cur.execute(select2)
                 for row in cur.fetchall():
-                    f.write(add_foreignkey.format(Migrate.to_ascii(row[0]),
+                    f.write(drop_constraint.format(Migrate.to_ascii(row[0]),
+                                                   Migrate.fk_name(row[0],
+                                                                   row[1])))
+                    f.write(add_constraint.format(Migrate.to_ascii(row[0]),
                                                   Migrate.fk_name(row[0],
                                                                   row[1]),
                                                   Migrate.pk_columns(row[1]),
@@ -458,6 +463,7 @@ class Migrate():
 
                 if myschema:
                     f.write('\n')
+                    f.write('{create_schema}\n')
                     for table in tables:
                         mytable = Migrate.to_ascii(table[0])
                         f.write(stm.format(f'{myschema}.{mytable}'))
@@ -560,7 +566,7 @@ class Migrate():
             self.__close_connections()
 
 
-    def py_upsert(self):
+    def upsert(self, upsert_py: bool=True):
         """
         Inserta nuevos registros o actualiza los existentes en la db postgres
             leyendo directamente los datos de la db access
@@ -583,6 +589,10 @@ class Migrate():
 
         upsert1 = \
         "insert into {} ({}) values ({}) on conflict ({}) do nothing;"
+
+        if not upsert_py:
+            print('No se hace nada, upsert_py tiene valor False')
+            return
 
         try:
             con_pg = None
