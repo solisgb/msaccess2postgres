@@ -18,11 +18,11 @@ create_db_structure: bool = False
 # write_sql
 # si True escribe la estructura de las tablas en 2 ficheros sql que deben ser
 # ejecutados
-write_sql: bool = True
+write_sql: bool = False
 
 # write_data_to_csv
 # si True graba los datos de cada tabla en un fichero csv
-write_data_to_csv: bool = False
+write_data_to_csv: bool = True
 
 # py_upsert
 # Si Truw ejecuta un upsert de los datos en la db access en la db postgres

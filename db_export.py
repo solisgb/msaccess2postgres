@@ -549,7 +549,7 @@ class Migrate():
                     msg = format_exc()
                     logging.append(f'tabla {table}\n{msg}')
 
-                with open(fname, 'w') as csvfile:
+                with open(fname, 'w', encoding='utf-8') as csvfile:
                     writer = csv.writer(csvfile,
                                         delimiter=',',
                                         quotechar='"',
@@ -557,6 +557,7 @@ class Migrate():
                                         lineterminator='\n')
                     writer.writerow(column_names)
                     for row in cur:
+#                        Migrate.__list_str_items_to_utf8(row)
                         writer.writerow(row)
 
         except:
@@ -633,6 +634,7 @@ class Migrate():
                     insert0 = insert.format(mytable, cols_str, placeholders)
                 cur.execute(select1.format(table[0]))
                 for i, row in enumerate(cur.fetchall()):
+                    Migrate.__list_str_items_to_utf8(row)
                     if table[1]:
                         uvalues = Migrate.upsert_values(table[1], cols, row,
                                                         on_conflict_update)
@@ -822,6 +824,16 @@ class Migrate():
         data2update = [row[i] for i, col_name in enumerate(col_names)
                        if col_name not in pk_columns]
         return data2insert + data2update
+
+
+    @staticmethod
+    def __list_str_items_to_utf8(row: list):
+        """
+        str to utf-8
+        """
+        for i, item in enumerate(row):
+            if isinstance(item, str):
+                row[i] = item.encode('Latin-1')
 
 
     def column_contents_2lowercase(self, pyupdate: bool, sqlupdate: bool):
