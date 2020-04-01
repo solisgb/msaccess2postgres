@@ -8,10 +8,10 @@ también se explica el significado de cada parámetro
 # _________________DATOS_______________________
 
 # ruta de la base de datos Access a migrar
-db: str = r'H:\off\db\analíticas_MASubt_07\SEGUIMIENTO_2018\MASb_Calidad\OPH_Subterraneas_2018.mdb'
+db: str = r'H:\off\db\analiticas_masub\SEGUIMIENTO_2017\Calidad\Subterraneas_2016_2017.mdb'
 
 # directorio de resultados (debe existir)
-dir_out: str = r'H:\off\db\analíticas_MASubt_07\SEGUIMIENTO_2018\MASb_Calidad\topostgres'
+dir_out: str = r'H:\off\db\analiticas_masub\SEGUIMIENTO_2017\Calidad\mig2pg'
 
 # schema_name
 # nombre del esquema donde se crearán las tablas si '' -> public

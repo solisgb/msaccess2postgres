@@ -634,7 +634,7 @@ class Migrate():
                     insert0 = insert.format(mytable, cols_str, placeholders)
                 cur.execute(select1.format(table[0]))
                 for i, row in enumerate(cur.fetchall()):
-                    Migrate.__list_str_items_to_utf8(row)
+#                    Migrate.__list_str_items_to_utf8(row)
                     if table[1]:
                         uvalues = Migrate.upsert_values(table[1], cols, row,
                                                         on_conflict_update)
