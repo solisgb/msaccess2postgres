@@ -22,7 +22,7 @@ write_sql: bool = False
 
 # write_data_to_csv
 # si True graba los datos de cada tabla en un fichero csv
-write_data_to_csv: bool = False
+write_data_to_csv: bool = True
 
 # py_upsert
 # Si Truw ejecuta un upsert de los datos en la db access en la db postgres
@@ -32,7 +32,7 @@ upsert_py: bool = False
 # claves primarias o ajenas en minúsculas (2 opciones):
 # keys2lower_py si True la conversón se hece directamente con python
 # keys2lower_sql si True se escribe un fichero sql
-keys2lower_py: bool = True
+keys2lower_py: bool = False
 keys2lower_sql: bool = False
 
 
