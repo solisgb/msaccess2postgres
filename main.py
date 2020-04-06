@@ -22,7 +22,7 @@ write_sql: bool = False
 
 # write_data_to_csv
 # si True graba los datos de cada tabla en un fichero csv
-write_data_to_csv: bool = True
+write_data_to_csv: bool = False
 
 # py_upsert
 # Si Truw ejecuta un upsert de los datos en la db access en la db postgres
@@ -49,18 +49,23 @@ if __name__ == "__main__":
 
         if create_db_structure:
             migrate.structure_to_sqlite()
+            logging.append('Se ejecutó structure_to_sqlite', False)
 
         if write_sql:
             migrate.structure_to_sql(par.schema_name)
+            logging.append('Se ejecutó structure_to_sql', False)
 
         if write_data_to_csv:
             migrate.export_data_to_csv()
+            logging.append('Se ejecutó export_data_to_csv', False)
 
         if upsert_py:
             migrate.upsert(upsert_py)
+            logging.append('Se ejecutó upsert', False)
 
         if keys2lower_py or keys2lower_sql:
             migrate.column_contents_2lowercase(keys2lower_py, keys2lower_sql)
+            logging.append('Se ejecutó column_contents_2lowercase', False)
 
 
         xtime = time() - startTime
